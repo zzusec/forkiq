@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .db import DB, log_event, utcnow
-from .backups import backup_path, verified_backup
+from .backups import BackupError, backup_path, delete_backup, verified_backup
 from .errors import error_guidance
 from .engine import (Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
@@ -498,6 +498,29 @@ def download_backup(request: Request, backup_id: int):
     return FileResponse(backup_path(db, record), media_type="application/octet-stream",
                         filename=f"{record['full_name'].replace('/', '-')}-{record['fork_sha'][:12]}.bundle",
                         headers={"Cache-Control": "no-store"})
+
+
+@app.post("/repos/{repo_id}/backups/{backup_id}/delete")
+def delete_backup_request(request: Request, repo_id: int, backup_id: int,
+                          csrf: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+    record = db.one("SELECT * FROM repository_backups WHERE id=?", (backup_id,))
+    if repo is None or record is None or record["repo_id"] != repo_id or record["full_name"] != repo["full_name"]:
+        return JSONResponse({"error": "仓库备份不存在"}, status_code=404)
+    if repo["restore_backup_id"] == backup_id:
+        return JSONResponse({"error": "回滚正在使用这份备份，暂时不能删除"}, status_code=409)
+    try:
+        deleted = delete_backup(db, backup_id, repo_id)
+    except BackupError as error:
+        return JSONResponse({"error": str(error)}, status_code=409)
+    log_event(db, repo_id, "check", f"{repo['full_name']} 已删除服务器备份 {deleted['fork_sha'][:12]}")
+    return RedirectResponse(f"/repos/{repo_id}?notice=已删除备份 {deleted['fork_sha'][:12]}", status_code=302)
 
 
 def _restore_record(repo_id, backup_id):

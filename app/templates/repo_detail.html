@@ -56,7 +56,7 @@
         {% for backup in backups %}
         <li>
           <div class="backup-version"><strong class="mono" title="{{ backup.fork_sha }}">{{ backup.fork_sha[:12] }}</strong><span class="muted">{{ timestamp(backup.created_at) }} · {{ '%.1f' | format(backup.size_bytes / 1048576) }} MiB</span><span class="mono backup-sha">{{ backup.fork_sha }}</span></div>
-          <div class="actions"><a class="secondary link" href="/backups/{{ backup.id }}/download">下载备份</a>{% if not repo.restore_backup_id %}<a class="danger link" href="/repos/{{ repo.id }}/backups/{{ backup.id }}/restore">回滚到此版本</a>{% endif %}</div>
+          <div class="actions"><a class="secondary link" href="/backups/{{ backup.id }}/download">下载备份</a>{% if not repo.restore_backup_id %}<a class="danger link" href="/repos/{{ repo.id }}/backups/{{ backup.id }}/restore">回滚到此版本</a><form method="post" action="/repos/{{ repo.id }}/backups/{{ backup.id }}/delete" class="confirm" data-confirm="删除后服务器将不再保留这份备份，只能从其他副本恢复。确认删除？"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="danger link">删除备份</button></form>{% else %}<span class="muted">回滚处理中</span>{% endif %}</div>
         </li>
         {% endfor %}
       </ul>

@@ -1700,6 +1700,43 @@ class WebTests(unittest.TestCase):
             wake.assert_not_called()
         self.assertEqual(dict(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))), before)
 
+    def test_backup_delete_requires_csrf_scope_and_removes_file_and_row(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        from app.backups import backup_path
+        path = backup_path(self.main.db, record)
+        delete_url = f"/repos/{repo_id}/backups/{record['id']}/delete"
+        self.assertTrue(path.exists())
+        self.assertEqual(self.client.post(delete_url).status_code, 403)
+        self.assertEqual(self.client.post(delete_url, data={"csrf": "wrong"}).status_code, 403)
+        self.assertEqual(self.client.post(f"/repos/{repo_id + 1}/backups/{record['id']}/delete",
+                                          data={"csrf": self.csrf(token)}).status_code, 404)
+        response = self.client.post(delete_url, data={"csrf": self.csrf(token)})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("notice=", response.headers["location"])
+        self.assertIsNone(self.main.db.one("SELECT * FROM repository_backups WHERE id=?", (record["id"],)))
+        self.assertFalse(path.exists())
+        self.assertIn("已删除服务器备份", self.main.db.one("SELECT message FROM events ORDER BY id DESC")["message"])
+
+    def test_backup_delete_does_not_remove_active_restore_snapshot_or_corrupt_file(self):
+        token = self.setup_admin()
+        repo_id, record = self.repository_with_backup()
+        from app.backups import backup_path
+        path = backup_path(self.main.db, record)
+        self.main.db.run("UPDATE repositories SET restore_backup_id=? WHERE id=?", (record["id"], repo_id))
+        response = self.client.post(f"/repos/{repo_id}/backups/{record['id']}/delete",
+                                    data={"csrf": self.csrf(token)})
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNotNone(self.main.db.one("SELECT * FROM repository_backups WHERE id=?", (record["id"],)))
+        self.assertTrue(path.exists())
+
+        self.main.db.run("UPDATE repositories SET restore_backup_id=NULL WHERE id=?", (repo_id,))
+        path.unlink()
+        response = self.client.post(f"/repos/{repo_id}/backups/{record['id']}/delete",
+                                    data={"csrf": self.csrf(token)})
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNotNone(self.main.db.one("SELECT * FROM repository_backups WHERE id=?", (record["id"],)))
+
     def test_restore_preview_reads_current_head_and_renders_csrf_confirmation_without_mutation(self):
         token = self.setup_admin()
         repo_id, record = self.repository_with_backup()
