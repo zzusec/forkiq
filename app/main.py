@@ -517,7 +517,7 @@ def delete_backup_request(request: Request, repo_id: int, backup_id: int,
         return JSONResponse({"error": "回滚正在使用这份备份，暂时不能删除"}, status_code=409)
     try:
         deleted = delete_backup(db, backup_id, repo_id)
-    except BackupError as error:
+    except (BackupError, OSError) as error:
         return JSONResponse({"error": str(error)}, status_code=409)
     log_event(db, repo_id, "check", f"{repo['full_name']} 已删除服务器备份 {deleted['fork_sha'][:12]}")
     return RedirectResponse(f"/repos/{repo_id}?notice=已删除备份 {deleted['fork_sha'][:12]}", status_code=302)

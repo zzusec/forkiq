@@ -98,7 +98,10 @@ def delete_backup(db, backup_id, repo_id=None):
     committed. If the row cannot be removed, it is put back so a failed delete
     never leaves a database entry pointing at a missing snapshot.
     """
-    root = _root(db)
+    try:
+        root = _root(db)
+    except OSError:
+        raise BackupError("备份目录缺失或无法访问，未删除记录") from None
     with _locked(root):
         record = db.one("SELECT * FROM repository_backups WHERE id=?", (backup_id,))
         if record is None or (repo_id is not None and record["repo_id"] != repo_id):
@@ -123,7 +126,12 @@ def delete_backup(db, backup_id, repo_id=None):
         except Exception:
             os.replace(temporary, path)
             raise
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # The database row is already gone; leave a private orphan for the
+            # next maintenance pass rather than reporting a false failure.
+            pass
         return dict(record)
 
 
