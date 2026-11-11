@@ -815,7 +815,7 @@ class WebTests(unittest.TestCase):
         interval = page.inside(form, "input", name="interval_minutes")[0]
         self.assertEqual(interval["attrs"].get("value"), "1.5")
         self.assertEqual(interval["attrs"].get("min"), "0.25")
-        self.assertEqual(interval["attrs"].get("max"), "5")
+        self.assertNotIn("max", interval["attrs"])
         self.assertTrue(page.find("p", id=interval["attrs"].get("aria-describedby")))
         self.assertIn("已受管且未暂停", response.text)
         self.assertIn("每 60 分钟", response.text)
@@ -1285,19 +1285,19 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.main.db.get_setting("github_installation_id"), "1000")
 
-    def test_settings_save_clamps_interval(self):
+    def test_settings_save_keeps_minimum_but_allows_long_intervals(self):
         token = self.setup_admin()
         self.client.post("/settings", data={"csrf": self.csrf(token), "interval_minutes": "0.01",
                                             "auto_discover": "1"})
         self.assertEqual(self.main.db.get_setting("check_interval"), "15")
         self.client.post("/settings", data={"csrf": self.csrf(token), "interval_minutes": "9999",
                                             "auto_discover": "0"})
-        self.assertEqual(self.main.db.get_setting("check_interval"), "300")
+        self.assertEqual(self.main.db.get_setting("check_interval"), "599940")
         self.assertEqual(self.main.db.get_setting("auto_discover"), "0")
 
     def test_minutes_round_trip_preserves_stored_seconds_and_wakes_worker(self):
         token = self.setup_admin()
-        for minutes, seconds in (("0.25", "15"), ("0.5", "30"), ("1", "60"), ("1.5", "90"), ("5", "300")):
+        for minutes, seconds in (("0.25", "15"), ("0.5", "30"), ("1", "60"), ("1.5", "90"), ("5", "300"), ("30", "1800"), ("60", "3600"), ("1440", "86400")):
             with self.subTest(minutes=minutes):
                 with mock.patch.object(self.main.worker, "request_sync") as wake:
                     response = self.client.post("/settings", data={
@@ -1321,7 +1321,7 @@ class WebTests(unittest.TestCase):
         token = self.setup_admin()
         self.main.db.set_setting("check_interval", "90")
         self.main.db.set_setting("auto_discover", "1")
-        for invalid in ("nan", "inf", "-inf", "invalid", ""):
+        for invalid in ("nan", "inf", "-inf", "invalid", "", "0", "-1", "1e308", "1e30"):
             with self.subTest(invalid=invalid), mock.patch.object(self.main.worker, "request_sync") as wake:
                 response = self.client.post("/settings", data={
                     "csrf": self.csrf(token), "interval_minutes": invalid, "auto_discover": "0"})

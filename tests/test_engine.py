@@ -1080,6 +1080,24 @@ class WorkerTickTests(unittest.TestCase):
         self.db.set_setting("github_installation_id", "42")
         self.db.set_setting("auto_discover", "1")
 
+    def test_worker_waits_for_custom_interval_and_rereads_after_wake(self):
+        self.db.set_setting("check_interval", "86400")
+        worker = engine.Worker(self.tmp.name, "/nonexistent.pem")
+        waits = []
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) == 1:
+                self.db.set_setting("check_interval", "1800")
+                worker.request_sync()
+            else:
+                worker.stop_flag.set()
+        with mock.patch.object(engine, "DB", return_value=self.db), \
+             mock.patch.object(worker, "_tick") as tick, \
+             mock.patch.object(worker.wake, "wait", side_effect=wait):
+            worker.run()
+        self.assertEqual(waits, [86400, 1800])
+        self.assertEqual(tick.call_count, 2)
+
     def test_auto_discover_runs_before_sync_and_obeys_hourly_schedule(self):
         from unittest import mock
 

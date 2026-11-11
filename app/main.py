@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from .db import DB, log_event, utcnow
 from .backups import backup_path, verified_backup
 from .errors import error_guidance
-from .engine import (Worker, add_manual, app_client_from_settings,
+from .engine import (MAX_CHECK_INTERVAL_SECONDS, Worker, add_manual, app_client_from_settings,
                      client_from_settings, discover, parse_fork_url)
 from .github import AuthError, exchange_manifest, write_pem
 from .protection import deletion_policy, load_review, parse_limits, review_token
@@ -805,11 +805,14 @@ def settings_save(request: Request, csrf: str = Form(""),
         # Accept the pre-deploy form's seconds field so an already-open settings
         # page cannot fail with a validation error during a rolling deploy.
         minutes = float(interval_minutes) if interval_minutes else float(interval) / 60
-        if not math.isfinite(minutes):
+        if not math.isfinite(minutes) or minutes <= 0:
             raise ValueError
-        value = round(max(0.25, min(5, minutes)) * 60)
+        seconds = max(0.25, minutes) * 60
+        if not math.isfinite(seconds) or seconds > MAX_CHECK_INTERVAL_SECONDS:
+            raise ValueError
+        value = round(seconds)
     except ValueError:
-        return RedirectResponse("/settings?notice=检查间隔必须是有效的分钟数，设置未保存", status_code=302)
+        return RedirectResponse("/settings?notice=检查间隔必须是有效的正数且不能超出系统支持范围，设置未保存", status_code=302)
     db.set_setting("check_interval", value)
     db.set_setting("auto_discover", "1" if auto_discover == "1" else "0")
     worker.request_sync()

@@ -16,6 +16,8 @@ from .protection import (assess_change, change_identity, deletion_policy, load_r
 
 BATCH = 50
 ERROR_RETRY_SECONDS = 600
+# Prevent platform wait overflow without imposing a product-level five-minute cap.
+MAX_CHECK_INTERVAL_SECONDS = int(threading.TIMEOUT_MAX) - 1
 # A repo whose comparison counts are unknown is probed at most this often, so a
 # probe that keeps failing cannot turn into one extra API call per cycle.
 COUNTS_PROBE_SECONDS = 6 * 3600
@@ -1039,7 +1041,7 @@ class Worker(threading.Thread):
         while not self.stop_flag.is_set():
             interval = 30
             try:
-                interval = max(15, min(300, int(db.get_setting("check_interval", "30"))))
+                interval = max(15, min(MAX_CHECK_INTERVAL_SECONDS, int(db.get_setting("check_interval", "30"))))
             except ValueError:
                 pass
             try:
