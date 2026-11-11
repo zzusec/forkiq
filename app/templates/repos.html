@@ -14,7 +14,7 @@
       <input type="hidden" name="filter" value="{{ filter }}">
       <div class="repo-search-query"><label for="repo-query">搜索仓库或上游</label><input id="repo-query" type="search" name="q" value="{{ q }}" maxlength="200" placeholder="输入名称，例如 project-sync"></div>
       <fieldset class="repo-mode-options"><legend>管理模式</legend><div class="mode-chips">
-        {% for value, label in [('', '全部模式'), ('safe', '安全同步'), ('protected', '独立维护')] %}
+        {% for value, label in [('', '全部模式'), ('safe', '安全同步'), ('protected', '独立维护'), ('force', '强制同步')] %}
         <label class="mode-chip"><input class="sr-only" type="radio" name="mode" value="{{ value }}" {% if mode == value %}checked{% endif %}><span>{{ label }}</span></label>
         {% endfor %}
       </div></fieldset>

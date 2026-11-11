@@ -765,6 +765,28 @@ class WebTests(unittest.TestCase):
         remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
         self.assertTrue(remove_form["attrs"].get("data-confirm"))
 
+    def test_force_mode_requires_explicit_confirmation_and_preserves_filters(self):
+        token = self.setup_admin()
+        repo_id, _ = self.repository_with_backup()
+        self.main.db.run("UPDATE repositories SET mode='protected',enabled=0,status='paused' WHERE id=?", (repo_id,))
+        path = f"/repos/{repo_id}/mode"
+        data = {"csrf": self.csrf(token), "mode_choice": "force"}
+        with mock.patch.object(self.main.worker, 'request_sync') as wake:
+            self.assertEqual(self.client.post(path, data=data).status_code, 400)
+            wake.assert_not_called()
+            response, page = self.rendered_page(f"/repos/{repo_id}/force-mode")
+            self.assert_post_form(page, path, token)
+            self.assertIn('持续生效', response.text)
+            self.assertEqual(self.main.db.one('SELECT mode FROM repositories WHERE id=?', (repo_id,))['mode'], 'protected')
+            self.assertEqual(self.client.post(path, data={**data, 'confirmation':'force'}).status_code, 302)
+            wake.assert_called_once()
+        row = self.main.db.one('SELECT * FROM repositories WHERE id=?', (repo_id,))
+        self.assertEqual((row['mode'], row['enabled'], row['sync_requested']), ('force', 1, 1))
+        self.assertIn('me/demo', self.client.get('/repos?mode=force').text)
+        self.assertNotIn('me/demo', self.client.get('/repos?mode=safe').text)
+        self.main.db.run('UPDATE repositories SET restore_backup_id=1 WHERE id=?', (repo_id,))
+        self.assertEqual(self.client.post(path, data={**data, 'confirmation':'force'}).status_code, 409)
+
     def test_repository_detail_prioritizes_sync_and_groups_advanced_actions(self):
         token = self.setup_admin()
         from app.db import insert_repository
@@ -1366,6 +1388,40 @@ class WebTests(unittest.TestCase):
         self.assertEqual(stub.refs["me/demo"], "a" * 40)
         self.assertFalse(any(call[0] in ("update_ref", "merge_commit") for call in stub.calls))
         return repo_id, stub, row
+
+    def test_force_deletion_review_blocks_and_requires_exact_one_use_approval(self):
+        from app.protection import load_review, review_token
+        token = self.setup_admin()
+        for case in ("large", "empty", "incomplete"):
+            with self.subTest(case=case):
+                repo_id, stub, _ = self.dangerous_deletion_review()
+                self.main.db.run("UPDATE repositories SET mode='force', status='pending', enabled=1, "
+                                 "deletion_review=NULL WHERE id=?", (repo_id,))
+                if case == "empty":
+                    stub.file_trees["up/demo", "b" * 40] = set()
+                if case == "incomplete":
+                    stub.tree_errors["up/demo", "b" * 40] = RuntimeError("incomplete tree")
+                observation = stub.nodes["N1"]
+                def row():
+                    return self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                with mock.patch.object(engine, "align_upstream", return_value="synced") as align:
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "needs_attention")
+                    align.assert_not_called()
+                    self.assertEqual(stub.refs["me/demo"], "a" * 40)
+                    self.assertEqual(row()["mode"], "force")
+                    approval = review_token(load_review(row()))
+                    response = self.client.post(f"/repos/{repo_id}/confirm-deletion",
+                                                data={"csrf": self.csrf(token), "review": approval})
+                    if case == "incomplete":
+                        self.assertEqual(response.status_code, 409)
+                        continue
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "synced")
+                    align.assert_called_once()
+                    self.assertIsNone(row()["deletion_approval"])
+                    # A failed/unconfirmed push cannot reuse the consumed approval.
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "needs_attention")
+                    align.assert_called_once()
 
     def backup_record(self, repo_id, full_name="me/demo", fork_sha=None, status="ready",
                       contents=b"isolated backup fixture\n", error=None):

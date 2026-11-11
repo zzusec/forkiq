@@ -21,6 +21,7 @@
         {% if r.last_error %}{% set guidance = r.last_error | error_guidance %}<a class="error-details" href="/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}" data-error-summary="{{ guidance.summary if guidance else '' }}" data-error-action="{{ guidance.action if guidance else '' }}">查看详情</a>{% endif %}</td>
     <td class="muted" data-label="最近检查">{{ timestamp(r.last_check_at) }}</td>
     <td class="repo-controls">
+      {% if r.mode == 'force' %}<span class="tag tag-warn">强制同步</span>{% endif %}
       {% if r.restore_backup_id is not none %}<span class="muted">等待回滚完成</span>{% elif r.mode == 'protected' %}<span class="tag tag-warn">独立维护</span>{% else %}
       <form method="post" action="/repos/{{ r.id }}/{{ 'pause' if r.enabled and r.status != 'paused' else 'resume' }}">
         <input type="hidden" name="csrf" value="{{ csrf }}">

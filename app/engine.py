@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import DB, log_event, insert_repository, utcnow
+from .force_sync import align_upstream
 from .backups import ensure_backup
 from .github import (AuthError, DispatchRejected, Forbidden, GitHub, MergeConflict,
                      RateLimited, RefNotFastForward, RefNotFound, RefObjectNotFound)
@@ -922,6 +923,14 @@ def sync_one(db, client, row, node, forced=False):
                   last_check_at=now, last_success_at=now, last_error=None,
                   deletion_review=None, deletion_approval=None, **version)
         return "synced"
+    if row["mode"] == "force":
+        # Force mode may overwrite fork-only commits and history, but it still
+        # must pass the same deletion review as safe mode.  The review is
+        # bound to both observed SHAs and can be released once for a specific
+        # target from the repository detail page.
+        if not _deletion_guard(db, client, row, fork_sha, upstream_sha):
+            return "needs_attention"
+        return align_upstream(db, client, row, fork_sha, upstream_sha)
     if not _fast_forward_guard(db, client, row, fork_sha, upstream_sha):
         return "paused"
     if not _deletion_guard(db, client, row, fork_sha, upstream_sha):

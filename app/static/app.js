@@ -137,8 +137,8 @@
     const labels = { pause: '暂停同步', resume: '恢复同步', sync: '安排同步', protect: '设为独立维护', remove: '移出管理' };
     const explanations = {
       pause: '停止后续上游同步，不影响仓库自身的 GitHub Actions。',
-      resume: '只恢复安全仓库；独立维护的仓库会跳过。同步前仍会检查独有提交。',
-      sync: '只为正在运行的安全仓库安排同步；暂停的仓库需要先恢复。',
+      resume: '按仓库原模式恢复；强制同步仓库仍会覆盖独有提交。独立维护的仓库会跳过。',
+      sync: '按仓库原模式安排同步；强制同步仓库仍会覆盖独有提交。暂停的仓库需要先恢复。',
       protect: '停止上游同步并设为独立维护。之后的批量恢复不会解除这项保护。',
       remove: '只移出面板，不删除 GitHub 仓库和服务器备份。开启自动发现后可能重新加入。',
     };
@@ -210,7 +210,7 @@
       chosen.forEach(input => {
         const item = document.createElement('li');
         const name = document.createElement('span');
-        name.textContent = input.dataset.repoName;
+        name.textContent = input.dataset.repoName + (input.dataset.repoMode === 'force' ? '（强制同步）' : '');
         const outcome = document.createElement('span');
         const reason = skipReason(input);
         outcome.textContent = reason || '将' + labels[action.value];

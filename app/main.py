@@ -115,8 +115,6 @@ def is_secure(request):
     return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
 
-
-
 def render(request, name, **context):
     token = request.cookies.get("forkiq_session", "")
     context.update(csrf=csrf_for(token) if token else "",
@@ -387,8 +385,9 @@ def _repo_filter(filter, q="", mode=""):
         statuses = STATUS_GROUPS.get(filter, (filter,))
         clauses.append("status IN (" + ",".join("?" for _ in statuses) + ")")
         params.extend(statuses)
-    if mode in ("safe", "protected"):
-        clauses.append("mode " + ("=" if mode == "protected" else "<>") + " 'protected'")
+    if mode in ("safe", "protected", "force"):
+        clauses.append("mode=?")
+        params.append(mode)
     q = q.strip()[:200]
     if q:
         clauses.append("(instr(lower(full_name),lower(?))>0 OR instr(lower(COALESCE(upstream_full_name,'')),lower(?))>0)")
@@ -403,7 +402,7 @@ def _repo_rows(filter, q="", mode=""):
 
 
 def _repo_list_context(filter, q="", mode=""):
-    q, mode = q.strip()[:200], mode if mode in ("safe", "protected") else ""
+    q, mode = q.strip()[:200], mode if mode in ("safe", "protected", "force") else ""
     revision = _repos_revision(filter, q, mode)
     return {"repos": annotate(_repo_rows(filter, q, mode)), "filter": filter, "q": q, "mode": mode, "revision": revision,
             "auto_discover": db.get_setting("auto_discover", "1") == "1"}
@@ -444,7 +443,7 @@ def partial_repos(request: Request, filter: str = "", q: str = "", mode: str = "
     """Rows only, for the background refresh: no shell, no full page reload."""
     if not current_session(request):
         return JSONResponse({"error": "未登录"}, status_code=401)
-    q, mode = q.strip()[:200], mode if mode in ("safe", "protected") else ""
+    q, mode = q.strip()[:200], mode if mode in ("safe", "protected", "force") else ""
     revision = _repos_revision(filter, q, mode)
     return _fragment(request, "partials/repo_table.html",
                      lambda: {"repos": annotate(_repo_rows(filter, q, mode)), "filter": filter, "q": q, "mode": mode,
@@ -478,8 +477,19 @@ def repo_bulk(request: Request, action: str = Form(""), repo_ids: list[str] = Fo
     if result["changed"] and action in ("resume", "sync"):
         worker.request_sync()
     query = urlencode({"filter": filter[:40], "q": q.strip()[:200],
-                       "mode": mode if mode in ("safe", "protected") else "", "notice": result["notice"]})
+                       "mode": mode if mode in ("safe", "protected", "force") else "", "notice": result["notice"]})
     return RedirectResponse("/repos?" + query, status_code=303)
+
+
+@app.get("/repos/{repo_id}/force-mode", response_class=HTMLResponse)
+def force_mode_preview(request: Request, repo_id: int):
+    guard = require_login(request)
+    if guard:
+        return guard
+    repo = db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+    if not repo:
+        return JSONResponse({"error": "仓库不存在"}, status_code=404)
+    return render(request, "force_mode.html", repo=repo)
 
 
 @app.get("/repos/{repo_id}", response_class=HTMLResponse)
@@ -592,7 +602,7 @@ def restore_request(request: Request, repo_id: int, backup_id: int,
     return RedirectResponse(f"/repos/{repo_id}?notice=回滚已排队，同步已暂停；请稍后刷新查看结果", status_code=302)
 
 
-def _repo_action(request, repo_id, csrf, action, return_filter=None, return_q="", return_mode=""):
+def _repo_action(request, repo_id, csrf, action, return_filter=None, return_q="", return_mode="", mode_choice="", confirmation=""):
     guard = require_login(request)
     if guard:
         return guard
@@ -619,13 +629,17 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None, return_q=""
         db.run("UPDATE repositories SET sync_requested=1, updated_at=? WHERE id=?", (utcnow(), repo_id))
         worker.request_sync()
     elif action == "mode":
-        mode = "safe" if repo["mode"] == "protected" else "protected"
-        enabled = int(mode == "safe")
+        if mode_choice and mode_choice not in ("safe", "protected", "force"):
+            return JSONResponse({"error": "无效同步模式"}, status_code=400)
+        if mode_choice == "force" and confirmation != "force":
+            return JSONResponse({"error": "请先打开强制同步确认页"}, status_code=400)
+        mode = mode_choice or ("safe" if repo["mode"] in ("protected", "force") else "protected")
+        enabled = int(mode != "protected")
         db.run("UPDATE repositories SET mode=?, enabled=?, status=?, last_error=NULL, "
                "diverged_at=NULL, diverged_upstream_sha=NULL, sync_requested=?, self_update_interval=NULL, "
                "deletion_review=NULL, deletion_approval=NULL, "
                "updated_at=? WHERE id=?", (mode, enabled, "pending" if enabled else "paused", enabled, utcnow(), repo_id))
-        label = "独立维护（禁止同步上游）" if mode == "protected" else "安全同步（仅快进，有独有提交立即停止）"
+        label = {"force": "强制同步（备份后始终对齐上游，覆盖独有提交）", "protected": "独立维护（禁止同步上游）", "safe": "安全同步（仅快进，有独有提交立即停止）"}[mode]
         log_event(db, repo_id, "check", f"{repo['full_name']} 同步方式切换为{label}")
         worker.request_sync()
     elif action == "selfupdate":
@@ -673,7 +687,7 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None, return_q=""
     if action in ("pause", "resume") and return_filter in ("all", *STATUS_GROUPS, "diverged", "blocked"):
         label = "已暂停同步" if action == "pause" else "已恢复同步，等待检查"
         query = urlencode({"filter": "" if return_filter == "all" else return_filter,
-                           "q": return_q.strip()[:200], "mode": return_mode if return_mode in ("safe", "protected") else "",
+                           "q": return_q.strip()[:200], "mode": return_mode if return_mode in ("safe", "protected", "force") else "",
                            "notice": f"{repo['full_name']} {label}"})
         return RedirectResponse(f"/repos?{query}#repo-{repo_id}", status_code=302)
     return RedirectResponse(f"/repos/{repo_id}" if action != "remove" else "/repos", status_code=302)
@@ -776,10 +790,11 @@ def repo_actions_toggle(request: Request, repo_id: int, enabled: str = Form("0")
 
 @app.post("/repos/{repo_id}/{action}")
 def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""),
-                return_filter: str | None = Form(None), return_q: str = Form(""), return_mode: str = Form("")):
+                return_filter: str | None = Form(None), return_q: str = Form(""), return_mode: str = Form(""),
+                mode_choice: str = Form(""), confirmation: str = Form("")):
     if action not in ("pause", "resume", "sync", "remove", "mode", "selfupdate"):
         return JSONResponse({"error": "不支持的操作"}, status_code=400)
-    return _repo_action(request, repo_id, csrf, action, return_filter, return_q, return_mode)
+    return _repo_action(request, repo_id, csrf, action, return_filter, return_q, return_mode, mode_choice, confirmation)
 
 
 @app.post("/repos/add", response_class=HTMLResponse)
