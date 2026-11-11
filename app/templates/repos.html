@@ -8,16 +8,22 @@
 {% block page_title %}仓库管理{% endblock %}
 {% block header_actions %}{% endblock %}
 {% block content %}
-    <div class="page-intro"><p class="muted">在仓库右侧暂停或恢复同步，不影响 GitHub Actions。</p></div>
+    <div class="page-intro"><p class="muted">先筛选，再批量管理。独立维护的仓库不会被批量恢复或同步。</p></div>
     {% if notice %}<div class="notice" role="status">{{ notice }}</div>{% endif %}
+    <form method="get" action="/repos" class="repo-search" role="search" aria-label="筛选仓库">
+      <input type="hidden" name="filter" value="{{ filter }}">
+      <div class="repo-search-query"><label for="repo-query">搜索仓库或上游</label><input id="repo-query" type="search" name="q" value="{{ q }}" maxlength="200" placeholder="输入名称，例如 project-sync"></div>
+      <fieldset class="repo-mode-options"><legend>管理模式</legend><div class="mode-chips">
+        {% for value, label in [('', '全部模式'), ('safe', '安全同步'), ('protected', '独立维护')] %}
+        <label class="mode-chip"><input class="sr-only" type="radio" name="mode" value="{{ value }}" {% if mode == value %}checked{% endif %}><span>{{ label }}</span></label>
+        {% endfor %}
+      </div></fieldset>
+      <button class="secondary">筛选</button>{% if q or mode or filter %}<a class="clear-filters" href="/repos">清除筛选</a>{% endif %}
+    </form>
     <div class="filters">
-        <a class="chip-link {% if not filter %}active{% endif %}" href="/repos">全部</a>
-        <a class="chip-link {% if filter == 'synced' %}active{% endif %}" href="/repos?filter=synced">已同步</a>
-        <a class="chip-link {% if filter == 'waiting' %}active{% endif %}" href="/repos?filter=waiting">待同步</a>
-        <a class="chip-link {% if filter == 'attention' %}active{% endif %}" href="/repos?filter=attention">需关注</a>
-        <a class="chip-link {% if filter == 'diverged' %}active{% endif %}" href="/repos?filter=diverged">分叉</a>
-        <a class="chip-link {% if filter == 'blocked' %}active{% endif %}" href="/repos?filter=blocked">阻塞</a>
-        <a class="chip-link {% if filter == 'paused' %}active{% endif %}" href="/repos?filter=paused">已暂停</a>
+        {% for value, label in [('', '全部'), ('synced', '已同步'), ('waiting', '待同步'), ('attention', '需关注'), ('diverged', '分叉'), ('blocked', '阻塞'), ('paused', '已暂停')] %}
+        <a class="chip-link {% if filter == value %}active{% endif %}" href="/repos{% if value or q or mode %}?filter={{ value }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}{% if mode %}&amp;mode={{ mode }}{% endif %}{% endif %}" {% if filter == value %}aria-current="true"{% endif %}>{{ label }}</a>
+        {% endfor %}
       </div>
     <div class="repo-toolbar">
     <details class="add-repo" {% if add_error %}open{% endif %}>
@@ -36,9 +42,34 @@
     <form method="post" action="/discover"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon('refresh-cw') }}发现新 fork</button></form>
     <span class="toolbar-help">自动发现{{ '已开启 · 每 60 分钟扫描' if auto_discover else '已关闭' }} · <a href="/settings#sync">设置</a></span>
     </div>
-    <section class="card">
-      <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}">{% include "partials/repo_table.html" %}</div>
+    <section class="card repo-management-card">
+      <div class="bulk-toolbar" aria-label="批量操作">
+        <div class="bulk-selection">
+          <label class="select-visible"><input type="checkbox" data-select-all aria-controls="repo-table-region">全选当前列表</label>
+          <span id="bulk-count" role="status" aria-live="polite">未选择仓库</span>
+          <button type="button" class="text-button" data-clear-selection disabled>清空选择</button>
+        </div>
+        <form method="post" action="/repos/bulk" id="repo-bulk-form" class="bulk-form">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="filter" value="{{ filter }}"><input type="hidden" name="q" value="{{ q }}"><input type="hidden" name="mode" value="{{ mode }}">
+          <input type="hidden" id="bulk-action" name="action" value="">
+          {% for value, label in [('pause', '暂停同步'), ('resume', '恢复同步'), ('sync', '立即同步'), ('protect', '设为独立维护'), ('remove', '移出管理')] %}
+          <button type="submit" class="{{ 'danger' if value == 'remove' else 'secondary' }}" data-bulk-action="{{ value }}" disabled>{{ label }}</button>
+          {% endfor %}
+        </form>
+        <p id="bulk-selection-help" class="field-help">选中仓库后点击操作，预览确认后执行；每次最多 500 个。</p>
+      </div>
+      <noscript><p class="notice">批量操作需要启用 JavaScript；仍可使用每个仓库右侧的操作。</p></noscript>
+      <div id="repo-table-region" data-refresh-url="/partials/repos?filter={{ filter|urlencode }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}{% if mode %}&amp;mode={{ mode }}{% endif %}">{% include "partials/repo_table.html" %}</div>
     </section>
+    <dialog id="bulk-dialog" aria-labelledby="bulk-dialog-title" aria-describedby="bulk-dialog-summary bulk-dialog-help">
+      <h2 id="bulk-dialog-title">确认批量操作</h2>
+      <p id="bulk-dialog-summary" class="bulk-summary"></p>
+      <p id="bulk-dialog-help" class="muted"></p>
+      <ul id="bulk-dialog-repos" class="bulk-preview-list"></ul>
+      <p class="field-help">提交时会再次检查仓库状态；独立维护和回滚中的仓库不会被误恢复。</p>
+      <div class="actions bulk-dialog-actions"><button type="button" class="secondary" data-bulk-cancel autofocus>取消</button><button type="button" class="primary" data-bulk-confirm>确认操作</button></div>
+    </dialog>
     <dialog id="error-dialog" aria-labelledby="error-dialog-title" aria-describedby="error-dialog-repo error-dialog-summary error-dialog-action">
       <button type="button" class="secondary" data-error-close autofocus>关闭</button>
       <h2 id="error-dialog-title">状态详情</h2>

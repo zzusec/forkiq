@@ -23,6 +23,7 @@ from .engine import (Worker, add_manual, app_client_from_settings,
 from .github import AuthError, exchange_manifest, write_pem
 from .protection import deletion_policy, load_review, parse_limits, review_token
 from .versions import annotate, fork_tone, short_time, version_verdict
+from .repo_actions import bulk_update
 
 STATE_DIR = Path(os.environ.get("FORKIQ_STATE_DIR", "/var/lib/forkiq"))
 PEM_PATH = os.environ.get("FORKIQ_PEM_PATH", "/var/lib/forkiq/app.pem")
@@ -372,41 +373,50 @@ def _overview_revision():
 
 
 @app.get("/repos", response_class=HTMLResponse)
-def repo_list(request: Request, filter: str = ""):
+def repo_list(request: Request, filter: str = "", q: str = "", mode: str = ""):
     guard = require_login(request)
     if guard:
         return guard
-    return render(request, "repos.html", **_repo_list_context(filter),
+    return render(request, "repos.html", **_repo_list_context(filter, q, mode),
                   notice=request.query_params.get("notice", ""))
 
 
-def _repo_filter(filter):
-    if not filter:
-        return "", ()
-    statuses = STATUS_GROUPS.get(filter, (filter,))
-    return " WHERE status IN (" + ",".join("?" for _ in statuses) + ")", statuses
+def _repo_filter(filter, q="", mode=""):
+    clauses, params = [], []
+    if filter:
+        statuses = STATUS_GROUPS.get(filter, (filter,))
+        clauses.append("status IN (" + ",".join("?" for _ in statuses) + ")")
+        params.extend(statuses)
+    if mode in ("safe", "protected"):
+        clauses.append("mode " + ("=" if mode == "protected" else "<>") + " 'protected'")
+    q = q.strip()[:200]
+    if q:
+        clauses.append("(instr(lower(full_name),lower(?))>0 OR instr(lower(COALESCE(upstream_full_name,'')),lower(?))>0)")
+        params.extend((q, q))
+    return (" WHERE " + " AND ".join(clauses) if clauses else ""), tuple(params)
 
 
-def _repo_rows(filter):
-    where, params = _repo_filter(filter)
+def _repo_rows(filter, q="", mode=""):
+    where, params = _repo_filter(filter, q, mode)
     return db.all("SELECT * FROM repositories" + where +
                   " ORDER BY status='diverged' DESC, status='blocked' DESC, full_name", params)
 
 
-def _repo_list_context(filter):
-    revision = _repos_revision(filter)
-    return {"repos": annotate(_repo_rows(filter)), "filter": filter, "revision": revision,
+def _repo_list_context(filter, q="", mode=""):
+    q, mode = q.strip()[:200], mode if mode in ("safe", "protected") else ""
+    revision = _repos_revision(filter, q, mode)
+    return {"repos": annotate(_repo_rows(filter, q, mode)), "filter": filter, "q": q, "mode": mode, "revision": revision,
             "auto_discover": db.get_setting("auto_discover", "1") == "1"}
 
 
-def _repos_revision(filter):
-    where, params = _repo_filter(filter)
+def _repos_revision(filter, q="", mode=""):
+    where, params = _repo_filter(filter, q, mode)
     # MAX timestamps miss changes to a different row in the same second. Hash the
     # displayed fields instead, without building version labels or fetching events.
     return _revision(
         "SELECT id, full_name, upstream_full_name, status, enabled, last_error, last_check_at, "
         "fork_sha, upstream_sha, fork_tag, upstream_tag, fork_commit_at, upstream_commit_at, "
-        "upstream_gone, last_merged_upstream_sha, upstream_ahead, fork_ahead "
+        "upstream_gone, last_merged_upstream_sha, upstream_ahead, fork_ahead, mode, restore_backup_id, sync_requested "
         "FROM repositories" + where + " ORDER BY id", params)
 
 
@@ -430,13 +440,14 @@ def _fragment(request, name, context_factory, revision):
 
 
 @app.get("/partials/repos", response_class=HTMLResponse)
-def partial_repos(request: Request, filter: str = ""):
+def partial_repos(request: Request, filter: str = "", q: str = "", mode: str = ""):
     """Rows only, for the background refresh: no shell, no full page reload."""
     if not current_session(request):
         return JSONResponse({"error": "未登录"}, status_code=401)
-    revision = _repos_revision(filter)
+    q, mode = q.strip()[:200], mode if mode in ("safe", "protected") else ""
+    revision = _repos_revision(filter, q, mode)
     return _fragment(request, "partials/repo_table.html",
-                     lambda: {"repos": annotate(_repo_rows(filter)), "filter": filter,
+                     lambda: {"repos": annotate(_repo_rows(filter, q, mode)), "filter": filter, "q": q, "mode": mode,
                               "revision": revision,
                               "csrf": csrf_for(request.cookies["forkiq_session"])}, revision)
 
@@ -449,6 +460,26 @@ def partial_overview(request: Request):
     revision = _overview_revision()
     return _fragment(request, "partials/overview_regions.html",
                      lambda: _overview_context(revision), revision)
+
+
+@app.post("/repos/bulk")
+def repo_bulk(request: Request, action: str = Form(""), repo_ids: list[str] = Form([]),
+              csrf: str = Form(""), filter: str = Form(""), q: str = Form(""), mode: str = Form("")):
+    guard = require_login(request)
+    if guard:
+        return guard
+    denied = check_csrf(request, csrf)
+    if denied:
+        return denied
+    try:
+        result = bulk_update(db, repo_ids, action)
+    except ValueError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    if result["changed"] and action in ("resume", "sync"):
+        worker.request_sync()
+    query = urlencode({"filter": filter[:40], "q": q.strip()[:200],
+                       "mode": mode if mode in ("safe", "protected") else "", "notice": result["notice"]})
+    return RedirectResponse("/repos?" + query, status_code=303)
 
 
 @app.get("/repos/{repo_id}", response_class=HTMLResponse)
@@ -561,7 +592,7 @@ def restore_request(request: Request, repo_id: int, backup_id: int,
     return RedirectResponse(f"/repos/{repo_id}?notice=回滚已排队，同步已暂停；请稍后刷新查看结果", status_code=302)
 
 
-def _repo_action(request, repo_id, csrf, action, return_filter=None):
+def _repo_action(request, repo_id, csrf, action, return_filter=None, return_q="", return_mode=""):
     guard = require_login(request)
     if guard:
         return guard
@@ -576,13 +607,14 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
     if repo["mode"] == "protected" and action in ("resume", "sync", "selfupdate"):
         return JSONResponse({"error": "独立维护仓库已禁止上游同步。需先切换为安全同步；检测到独有提交仍会停止。"}, status_code=409)
     if action == "pause":
-        db.run("UPDATE repositories SET status='paused', enabled=0, deletion_approval=NULL, updated_at=? WHERE id=?",
+        db.run("UPDATE repositories SET status='paused', enabled=0, sync_requested=0, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
         log_event(db, repo_id, "blocked", f"{repo['full_name']} 已暂停")
     elif action == "resume":
-        db.run("UPDATE repositories SET status='pending', enabled=1, last_error=NULL, deletion_approval=NULL, updated_at=? WHERE id=?",
+        db.run("UPDATE repositories SET status='pending', enabled=1, sync_requested=1, last_error=NULL, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
         log_event(db, repo_id, "check", f"{repo['full_name']} 已恢复")
+        worker.request_sync()
     elif action == "sync":
         db.run("UPDATE repositories SET sync_requested=1, updated_at=? WHERE id=?", (utcnow(), repo_id))
         worker.request_sync()
@@ -641,6 +673,7 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
     if action in ("pause", "resume") and return_filter in ("all", *STATUS_GROUPS, "diverged", "blocked"):
         label = "已暂停同步" if action == "pause" else "已恢复同步，等待检查"
         query = urlencode({"filter": "" if return_filter == "all" else return_filter,
+                           "q": return_q.strip()[:200], "mode": return_mode if return_mode in ("safe", "protected") else "",
                            "notice": f"{repo['full_name']} {label}"})
         return RedirectResponse(f"/repos?{query}#repo-{repo_id}", status_code=302)
     return RedirectResponse(f"/repos/{repo_id}" if action != "remove" else "/repos", status_code=302)
@@ -743,10 +776,10 @@ def repo_actions_toggle(request: Request, repo_id: int, enabled: str = Form("0")
 
 @app.post("/repos/{repo_id}/{action}")
 def repo_action(request: Request, repo_id: int, action: str, csrf: str = Form(""),
-                return_filter: str | None = Form(None)):
+                return_filter: str | None = Form(None), return_q: str = Form(""), return_mode: str = Form("")):
     if action not in ("pause", "resume", "sync", "remove", "mode", "selfupdate"):
         return JSONResponse({"error": "不支持的操作"}, status_code=400)
-    return _repo_action(request, repo_id, csrf, action, return_filter)
+    return _repo_action(request, repo_id, csrf, action, return_filter, return_q, return_mode)
 
 
 @app.post("/repos/add", response_class=HTMLResponse)

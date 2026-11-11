@@ -120,6 +120,121 @@
     });
   }
 
+  const bulkForm = document.querySelector('#repo-bulk-form');
+  const bulkDialog = document.querySelector('#bulk-dialog');
+  let updateSelection = () => {};
+  if (bulkForm) {
+    const selectAll = document.querySelector('[data-select-all]');
+    const clear = document.querySelector('[data-clear-selection]');
+    const count = document.querySelector('#bulk-count');
+    const help = document.querySelector('#bulk-selection-help');
+    const action = document.querySelector('#bulk-action');
+    const actionButtons = [...bulkForm.querySelectorAll('[data-bulk-action]')];
+    let preview = null;
+    const confirm = bulkDialog?.querySelector('[data-bulk-confirm]');
+    const checks = () => [...document.querySelectorAll('[data-repo-select]')];
+    const selected = () => checks().filter(input => input.checked && !input.disabled);
+    const labels = { pause: '暂停同步', resume: '恢复同步', sync: '安排同步', protect: '设为独立维护', remove: '移出管理' };
+    const explanations = {
+      pause: '停止后续上游同步，不影响仓库自身的 GitHub Actions。',
+      resume: '只恢复安全仓库；独立维护的仓库会跳过。同步前仍会检查独有提交。',
+      sync: '只为正在运行的安全仓库安排同步；暂停的仓库需要先恢复。',
+      protect: '停止上游同步并设为独立维护。之后的批量恢复不会解除这项保护。',
+      remove: '只移出面板，不删除 GitHub 仓库和服务器备份。开启自动发现后可能重新加入。',
+    };
+    function skipReason(input) {
+      const d = input.dataset;
+      const paused = d.repoEnabled !== '1' || d.repoStatus === 'paused';
+      if (['resume', 'sync'].includes(action.value) && d.repoMode === 'protected') return '独立维护，跳过';
+      if (action.value === 'pause' && d.repoEnabled === '0' && d.repoStatus === 'paused' && d.repoQueued !== '1') return '已暂停，跳过';
+      if (action.value === 'resume' && !paused) return '已启用，跳过';
+      if (action.value === 'sync' && paused) return '需先恢复，跳过';
+      if (action.value === 'sync' && d.repoQueued === '1') return '已在队列，跳过';
+      if (action.value === 'protect' && d.repoMode === 'protected' && d.repoEnabled === '0' && d.repoStatus === 'paused') return '已独立维护，跳过';
+      return '';
+    }
+    updateSelection = () => {
+      const all = checks(), available = all.filter(input => !input.disabled), chosen = selected();
+      all.forEach(input => input.closest('tr')?.classList.toggle('is-selected', input.checked && !input.disabled));
+      selectAll.checked = available.length > 0 && chosen.length === available.length;
+      selectAll.indeterminate = chosen.length > 0 && chosen.length < available.length;
+      selectAll.disabled = !available.length;
+      clear.disabled = !chosen.length;
+      count.textContent = chosen.length ? `已选择 ${chosen.length} 个仓库` : '未选择仓库';
+      actionButtons.forEach(button => { button.disabled = !chosen.length || chosen.length > 500; });
+      help.textContent = chosen.length ? '选择期间暂停列表自动刷新；提交时会重新检查状态。每次最多 500 个仓库。' :
+        '选中仓库后点击操作，预览确认后执行；每次最多 500 个。';
+      // Changing the operation alone must not freeze refresh after selection is cleared.
+      delete bulkForm.dataset.editing;
+    };
+    selectAll.addEventListener('change', () => {
+      let n = 0;
+      checks().forEach(input => { input.checked = !input.disabled && selectAll.checked && n++ < 500; });
+      updateSelection();
+    });
+    clear.addEventListener('click', () => {
+      checks().forEach(input => { input.checked = false; });
+      updateSelection();
+    });
+    document.addEventListener('change', event => {
+      if (event.target.matches?.('[data-repo-select]')) {
+        if (selected().length > 500) {
+          event.target.checked = false;
+          updateSelection();
+          help.textContent = '每次最多选择 500 个仓库，请分批操作。';
+        } else updateSelection();
+      }
+    });
+    let approved = false;
+    bulkForm.addEventListener('submit', event => {
+      preview = event.submitter;
+      action.value = preview?.dataset.bulkAction || '';
+      if (bulkForm.dataset.submitting || !selected().length || !labels[action.value] || selected().length > 500) {
+        event.preventDefault();
+        return;
+      }
+      if (approved) { approved = false; return; }
+      const chosen = selected();
+      const eligible = chosen.filter(input => !skipReason(input)).length;
+      const summary = `选择 ${chosen.length} 个，将处理 ${eligible} 个，跳过 ${chosen.length - eligible} 个。`;
+      if (!bulkDialog || typeof bulkDialog.showModal !== 'function') {
+        if (!eligible || !window.confirm(`${labels[action.value]}：${summary}\n${explanations[action.value]}`)) event.preventDefault();
+        return;
+      }
+      event.preventDefault();
+      bulkDialog.querySelector('#bulk-dialog-title').textContent = '批量' + labels[action.value];
+      bulkDialog.querySelector('#bulk-dialog-summary').textContent = summary;
+      bulkDialog.querySelector('#bulk-dialog-help').textContent = explanations[action.value];
+      const list = bulkDialog.querySelector('#bulk-dialog-repos');
+      list.replaceChildren();
+      chosen.forEach(input => {
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        name.textContent = input.dataset.repoName;
+        const outcome = document.createElement('span');
+        const reason = skipReason(input);
+        outcome.textContent = reason || '将' + labels[action.value];
+        outcome.className = reason ? 'muted' : 'bulk-will-change';
+        item.append(name, outcome);
+        list.append(item);
+      });
+      confirm.textContent = eligible ? `确认${labels[action.value]} ${eligible} 个` : '没有可操作的仓库';
+      confirm.disabled = !eligible;
+      confirm.className = action.value === 'remove' ? 'danger' : 'primary';
+      bulkDialog.showModal();
+    });
+    if (bulkDialog && confirm) {
+      bulkDialog.querySelector('[data-bulk-cancel]').addEventListener('click', () => bulkDialog.close());
+      confirm.addEventListener('click', () => {
+        bulkDialog.close();
+        approved = true;
+        bulkForm.requestSubmit(preview);
+      });
+      bulkDialog.addEventListener('close', () => preview?.focus());
+    }
+    updateSelection();
+  }
+
   const boundForms = new WeakSet();
   function bindForms(container) {
     container.querySelectorAll('form').forEach(form => {
@@ -127,6 +242,7 @@
       boundForms.add(form);
       form.addEventListener('input', () => { form.dataset.editing = 'true'; });
       form.addEventListener('submit', event => {
+        if (event.defaultPrevented) return;
         if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) {
           event.preventDefault();
           return;
@@ -151,7 +267,7 @@
     const region = document.querySelector('#' + refresh.dataset.refreshRegion);
     // Keep reading and keyboard focus intact, including while a fetch is in flight.
     const busy = () => document.hidden || document.body.classList.contains('nav-open') ||
-      errorDialog?.open || region?.querySelector('details[open]') ||
+      errorDialog?.open || bulkDialog?.open || document.querySelector('[data-repo-select]:checked') || region?.querySelector('details[open]') ||
       document.querySelector('form[data-editing], form[data-submitting]') ||
       document.activeElement?.matches('input, select, textarea, button') ||
       (region?.contains(document.activeElement) && document.activeElement?.matches('a[href], summary'));
@@ -178,6 +294,7 @@
           region.innerHTML = html;
           localizeTimes(region);
           bindForms(region);
+          updateSelection();
         }
       } catch { /* Keep the current view; the next tick retries. */ }
       finally { inFlight = false; }
@@ -193,5 +310,6 @@
       button.disabled = false;
       button.removeAttribute('aria-busy');
     });
+    updateSelection();
   });
 })();

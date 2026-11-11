@@ -1854,5 +1854,70 @@ class WebTests(unittest.TestCase):
         self.assertNotIn(TEST_PASSWORD, response.text)
 
 
+    def test_bulk_form_auth_csrf_and_partial_success(self):
+        self.assertEqual(self.client.post("/repos/bulk", data={"action": "pause", "repo_ids": "1"}).status_code, 302)
+        token = self.setup_admin()
+        from app.db import insert_repository
+        ids = [insert_repository(self.main.db, owner="me", name=name, full_name="me/" + name,
+                                 upstream_full_name="up/project") for name in ("sync", "custom", "other")]
+        self.main.db.run("UPDATE repositories SET enabled=0,status='paused'")
+        self.main.db.run("UPDATE repositories SET mode='protected' WHERE id=?", (ids[1],))
+        payload = {"action": "resume", "repo_ids": [str(ids[0]), str(ids[1])],
+                   "filter": "paused", "q": "project", "mode": "safe"}
+        self.assertEqual(self.client.post("/repos/bulk", data=payload).status_code, 403)
+        payload["csrf"] = self.csrf(token)
+        with mock.patch.object(self.main.worker, "request_sync") as wake:
+            response = self.client.post("/repos/bulk", data=payload)
+        self.assertEqual(response.status_code, 303)
+        wake.assert_called_once()
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        self.assertEqual(query["q"], ["project"])
+        self.assertEqual(query["mode"], ["safe"])
+        self.assertIn("已处理 1 个，跳过 1 个", query["notice"][0])
+        self.assertIn("独立维护", query["notice"][0])
+        for id in ids[1:]:
+            self.assertEqual(self.main.db.one("SELECT enabled FROM repositories WHERE id=?", (id,))["enabled"], 0)
+        response = self.client.post("/repos/bulk", data={"csrf": self.csrf(token), "action": "pause"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_repo_search_mode_filter_and_fragment_keep_the_same_scope(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        for name, upstream, mode in (("sync", "up/alpha", "safe"), ("custom", "up/alpha", "protected"), ("elsewhere", "up/beta", "safe")):
+            id = insert_repository(self.main.db, owner="me", name=name, full_name="me/" + name, upstream_full_name=upstream)
+            self.main.db.run("UPDATE repositories SET mode=? WHERE id=?", (mode, id))
+        response, page = self.rendered_page("/repos?q=ALPHA&mode=safe")
+        self.assertIn("me/sync", response.text)
+        self.assertNotIn("me/custom", response.text)
+        self.assertNotIn("me/elsewhere", response.text)
+        form = self.assert_post_form(page, "/repos/bulk", token)
+        checks = page.find("input", name="repo_ids")
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["attrs"]["form"], "repo-bulk-form")
+        self.assertTrue(page.labels_for(checks[0]))
+        self.assertFalse(any(p["tag"] == "form" for p in form["parents"]))
+        fragment = self.client.get("/partials/repos?q=ALPHA&mode=safe")
+        self.assertIn("me/sync", fragment.text)
+        self.assertNotIn("me/custom", fragment.text)
+        revision = fragment.headers["x-forkiq-revision"]
+        self.assertEqual(self.client.get("/partials/repos?q=ALPHA&mode=safe&v=" + revision).status_code, 204)
+        self.assertEqual(self.client.get("/partials/repos?q=ALPHA&mode=protected&v=" + revision).status_code, 200)
+        self.assertIn("没有符合筛选条件", self.client.get("/repos?q=%25").text)
+
+    def test_fragment_revision_tracks_protection_and_rollback_eligibility(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo", upstream_full_name="up/demo")
+        old = self.main._repos_revision("")
+        self.main.db.run("UPDATE repositories SET mode='protected' WHERE id=?", (id,))
+        self.assertNotEqual(old, self.main._repos_revision(""))
+        old = self.main._repos_revision("")
+        self.main.db.run("UPDATE repositories SET restore_backup_id=42 WHERE id=?", (id,))
+        self.assertNotEqual(old, self.main._repos_revision(""))
+        _, page = self.rendered_page("/repos")
+        check = page.find("input", name="repo_ids")[0]
+        self.assertIn("disabled", check["attrs"])
+
+
 if __name__ == "__main__":
     unittest.main()
