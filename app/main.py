@@ -1,6 +1,7 @@
 """ForkIQ: GitHub fork sync panel."""
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
@@ -114,6 +115,37 @@ def is_secure(request):
     return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
 
+def client_ip(request):
+    """Use the forwarded client address only when the peer is a local proxy."""
+    peer = request.client.host if request.client else "unknown"
+    try:
+        local_proxy = ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        local_proxy = False
+    if local_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        if forwarded:
+            try:
+                return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+    return peer
+
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if is_secure(request):
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    return response
+
+
+
 def render(request, name, **context):
     token = request.cookies.get("forkiq_session", "")
     context.update(csrf=csrf_for(token) if token else "",
@@ -170,8 +202,8 @@ def setup_submit(request: Request, password: str = Form(""), password2: str = Fo
         return render(request, "setup.html", error="密码至少 8 位")
     if password != password2:
         return render(request, "setup.html", error="两次输入的密码不一致")
-    db.set_setting("admin_pass_hash", hash_password(password))
-    db.set_setting("setup_done", "1")
+    if not db.setup_admin(hash_password(password)):
+        return RedirectResponse("/", status_code=302)
     log_event(db, None, "auth", "管理员密码已设置")
     return RedirectResponse("/github/connect", status_code=302)
 
@@ -187,7 +219,7 @@ def login_page(request: Request):
 def login_submit(request: Request, password: str = Form("")):
     if db.get_setting("setup_done") != "1":
         return RedirectResponse("/setup", status_code=302)
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     now = time.time()
     failures = [t for t in _login_failures.get(ip, []) if now - t < LOGIN_WINDOW]
     if len(failures) >= LOGIN_MAX:
@@ -198,6 +230,8 @@ def login_submit(request: Request, password: str = Form("")):
         _login_failures[ip] = failures
         return render(request, "login.html", error="密码不正确")
     _login_failures.pop(ip, None)
+    # Keep expired sessions from accumulating on a long-lived public instance.
+    db.run("DELETE FROM sessions WHERE expires_at < ?", (now,))
     token = secrets.token_urlsafe(32)
     db.run("INSERT INTO sessions(token,created_at,expires_at) VALUES(?,?,?)",
            (token, now, now + SESSION_TTL))

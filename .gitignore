@@ -8,4 +8,13 @@ __pycache__/
 *.db-wal
 *.db-shm
 app.pem
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+*.bundle
+deploy/*.local.*
 dist/

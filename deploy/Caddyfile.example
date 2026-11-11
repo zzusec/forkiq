@@ -1,0 +1,5 @@
+# Replace the hostname with the same value used in FORKIQ_PUBLIC_URL.
+# Caddy obtains and renews the public TLS certificate automatically.
+fork.example.com {
+    reverse_proxy 127.0.0.1:8792
+}
