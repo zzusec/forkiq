@@ -145,7 +145,7 @@ class WebTests(unittest.TestCase):
                   ("/repos", "/repos", ["/repos/add"]),
                   (f"/repos/{repo_id}", "/repos",
                    [f"/repos/{repo_id}/{action}" for action in
-                    ("sync", "mode", "selfupdate", "pause", "actions", "remove")]),
+                    ("sync", "mode", "pause", "actions", "remove")]),
                   ("/settings", "/settings",
                    ["/settings", "/settings/password", "/settings/disconnect"])]
         for path, active_path, actions in routes:
@@ -778,13 +778,10 @@ class WebTests(unittest.TestCase):
             self.assertNotIn("open", advanced["attrs"])
             for action in ("sync", "pause"):
                 self.assertTrue(page.inside(toolbar, "form", action=f"/repos/{repo_id}/{action}"))
-            for action in ("mode", "selfupdate", "actions", "remove"):
+            for action in ("mode", "actions", "remove"):
                 self.assertTrue(page.inside(advanced, "form", action=f"/repos/{repo_id}/{action}"))
             mode_form = self.assert_post_form(page, f"/repos/{repo_id}/mode", token)
-            if mode == "manual":
-                self.assertIn("不再保留 fork 自有提交", mode_form["attrs"].get("data-confirm", ""))
-            else:
-                self.assertNotIn("data-confirm", mode_form["attrs"])
+            self.assertNotIn("data-confirm", mode_form["attrs"])
             remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
             self.assertIn("自动发现", remove_form["attrs"]["data-confirm"])
 
@@ -1169,24 +1166,31 @@ class WebTests(unittest.TestCase):
         self.client.post(f"/repos/{repo_id}/remove", data={"csrf": self.csrf(token)})
         self.assertIsNone(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
 
-    def test_mode_toggle_switches_and_resets_state(self):
+    def test_mode_toggle_protects_and_safe_mode_always_rechecks(self):
         token = self.setup_admin()
         from app.db import insert_repository
         repo_id = insert_repository(self.main.db, owner="me", name="demo",
                                     full_name="me/demo", upstream_full_name="up/demo")
-        self.main.db.run("UPDATE repositories SET status='diverged', diverged_at='x', "
-                         "diverged_upstream_sha='y' WHERE id=?", (repo_id,))
-        response = self.client.post(f"/repos/{repo_id}/mode", data={"csrf": self.csrf(token)})
+        endpoint = f"/repos/{repo_id}"
+        response = self.client.post(endpoint + "/mode", data={"csrf": self.csrf(token)})
         self.assertEqual(response.status_code, 302)
         row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
-        self.assertEqual(row["mode"], "manual")
-        self.assertEqual(row["status"], "pending")
-        self.assertIsNone(row["diverged_at"])
-        self.assertEqual(row["sync_requested"], 1)
-        # toggling back returns to mirror mode
-        self.client.post(f"/repos/{repo_id}/mode", data={"csrf": self.csrf(token)})
+        self.assertEqual(row["mode"], "protected")
+        self.assertEqual(row["status"], "paused")
+        self.assertEqual(row["enabled"], 0)
+        self.assertEqual(row["sync_requested"], 0)
+        for action in ("sync", "resume", "selfupdate"):
+            self.assertEqual(self.client.post(endpoint + "/" + action,
+                             data={"csrf": self.csrf(token)}).status_code, 409)
+        _, page = self.rendered_page(endpoint)
+        self.assertFalse(page.find("form", action=endpoint + "/resume"))
+        self.assertFalse(page.find("form", action=endpoint + "/sync"))
+        self.client.post(endpoint + "/mode", data={"csrf": self.csrf(token)})
         row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
-        self.assertEqual(row["mode"], "mirror")
+        self.assertEqual(row["mode"], "safe")
+        self.assertEqual(row["enabled"], 1)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["sync_requested"], 1)
 
     def test_selfupdate_toggle_enables_actions_and_permissions(self):
         token = self.setup_admin()

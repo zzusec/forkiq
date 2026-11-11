@@ -86,7 +86,7 @@
               <label for="deletion-max-files">删除文件数阈值<input id="deletion-max-files" type="number" name="max_files" value="{{ protection.max_files }}" min="0" max="1000000" step="1" required></label>
               <label for="deletion-max-percent">删除比例阈值（%）<input id="deletion-max-percent" type="number" name="max_percent" value="{{ protection.max_percent }}" min="0" max="100" step="any" required></label>
             </div>
-            <p id="protection-help" class="field-help">任一阈值被超过即拦截，比例以 fork 当前文件数为分母。空文件树始终拦截；无法完成检测也不更新。适用于镜像快进、强制对齐和手工合并，仓库详情可单独覆盖。</p>
+            <p id="protection-help" class="field-help">任一阈值被超过即拦截，比例以 fork 当前文件数为分母。空文件树始终拦截；无法完成检测也不更新。仅允许快进；独有提交保护不能通过关闭此开关绕过。</p>
             <p class="field-help">服务器备份固定开启：首次检查和每次更新前保存当前提交及其可达历史，每仓库保留最近 3 份不同版本。备份失败不更新，关闭删除保护也不能跳过备份。到仓库详情下载或回滚；回滚后保持暂停。</p>
             <p class="field-help">默认开启：超过 100 个或 50%。拦截后到仓库详情查看删除量及目标提交，必要时「确认并同步此次变更」。关闭保护有内容丢失风险。</p>
             <button class="primary">保存删除保护</button>

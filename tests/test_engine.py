@@ -221,40 +221,37 @@ class EngineTests(unittest.TestCase):
         self.assertIn(("update_ref", "me/demo", "main", "b" * 40), self.client.calls)
         self.assertIn(("get_ref", "me/demo"), self.client.calls)
 
-    def test_mirror_force_aligns_when_the_fork_holds_its_own_commits(self):
-        # A mirror must equal upstream: when a fast-forward is refused because
-        # the fork carries commits upstream does not have, the ref is moved onto
-        # upstream's head instead of freezing the repository as diverged.
+    def test_non_fast_forward_never_escalates_0(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        self.client.refs["me/demo"] = "a" * 40
+        self.client.refs["up/demo"] = "c" * 40
+        self.client.ref_error["me/demo"] = RefNotFastForward("non-FF")
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.row()["fork_sha"], "b" * 40)
-        self.assertEqual(self.client.refs["me/demo"], "b" * 40)
-        self.assertEqual(self.client.forced_refs, [("me/demo", "b" * 40)])
-        self.assertEqual(self.row()["fork_ahead"], 0)
-        self.assertEqual(self.row()["upstream_ahead"], 0)
-        self.assertIsNone(self.row()["last_error"])
-        events = [row["message"] for row in self.db.all(
-            "SELECT message FROM events WHERE kind='synced' ORDER BY id")]
-        self.assertTrue(any("强制对齐" in message for message in events), events)
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.client.refs["me/demo"], "a" * 40)
+        self.assertEqual(self.client.forced_refs, [])
+        self.client.calls.clear()
+        engine.run_cycle(self.db, self.client)
+        self.assertFalse(any(c[0] in ("update_ref", "merge_commit") for c in self.client.calls))
 
-    def test_mirror_aligns_again_when_upstream_rewrites_history(self):
-        # No common ancestor means upstream rewrote its history; the mirror
-        # still follows it rather than keeping the old commits.
+
+    def test_non_fast_forward_never_escalates_1(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        self.client.refs["me/demo"] = "a" * 40
+        self.client.refs["up/demo"] = "c" * 40
+        self.client.ref_error["me/demo"] = RefNotFastForward("non-FF")
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        # Upstream rewrites again: the same cycle re-aligns without freezing.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "b" * 40, "c" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.client.refs["me/demo"], "a" * 40)
+        self.assertEqual(self.client.forced_refs, [])
+        self.client.calls.clear()
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.client.refs["me/demo"], "c" * 40)
-        self.assertEqual(self.client.forced_refs[-1], ("me/demo", "c" * 40))
-        self.assertEqual(self.row()["diverged_at"], None)
-        self.assertEqual(self.row()["diverged_upstream_sha"], None)
+        self.assertFalse(any(c[0] in ("update_ref", "merge_commit") for c in self.client.calls))
+
 
     def test_mirror_does_not_touch_an_aligned_repository(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "b" * 40, "b" * 40)
@@ -264,14 +261,21 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(any(c[0] == "update_ref" for c in self.client.calls))
         self.assertEqual(self.client.forced_refs, [])
 
-    def test_mirror_force_alignment_after_a_lost_race(self):
-        # The fork is strictly behind (someone else advanced upstream between the
-        # read and the push); the mirror still ends up equal to upstream.
+    def test_non_fast_forward_never_escalates_2(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = RefNotFastForward("422")
+        self.client.refs["me/demo"] = "a" * 40
+        self.client.refs["up/demo"] = "c" * 40
+        self.client.ref_error["me/demo"] = RefNotFastForward("non-FF")
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.client.refs["me/demo"], "b" * 40)
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.client.refs["me/demo"], "a" * 40)
+        self.assertEqual(self.client.forced_refs, [])
+        self.client.calls.clear()
+        engine.run_cycle(self.db, self.client)
+        self.assertFalse(any(c[0] in ("update_ref", "merge_commit") for c in self.client.calls))
+
 
     def test_missing_object_refreshes_upstream_once_and_verifies_new_target(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
@@ -304,27 +308,37 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.row()["upstream_tag"], "v9.9.9")
         self.assertEqual(self.client.forced_refs, [])
 
-    def test_missing_object_during_force_alignment_restarts_with_safe_update(self):
+    def test_non_fast_forward_never_escalates_3(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = [
-            RefNotFastForward("Update is not a fast forward"),
-            RefObjectNotFound("Object does not exist")]
+        self.client.refs["me/demo"] = "a" * 40
         self.client.refs["up/demo"] = "c" * 40
+        self.client.ref_error["me/demo"] = RefNotFastForward("non-FF")
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.row()["fork_sha"], "c" * 40)
-        self.assertEqual(self.client.forced_refs, [("me/demo", "b" * 40)])
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.client.refs["me/demo"], "a" * 40)
+        self.assertEqual(self.client.forced_refs, [])
+        self.client.calls.clear()
+        engine.run_cycle(self.db, self.client)
+        self.assertFalse(any(c[0] in ("update_ref", "merge_commit") for c in self.client.calls))
 
-    def test_refreshed_target_is_forced_only_after_explicit_non_fast_forward(self):
+
+    def test_non_fast_forward_never_escalates_4(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.ref_error["me/demo"] = [
-            RefObjectNotFound("Object does not exist"),
-            RefNotFastForward("Update is not a fast forward")]
+        self.client.refs["me/demo"] = "a" * 40
         self.client.refs["up/demo"] = "c" * 40
+        self.client.ref_error["me/demo"] = [RefObjectNotFound("missing"), RefNotFastForward("non-FF")]
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.client.forced_refs, [("me/demo", "c" * 40)])
-        self.assertEqual(self.row()["fork_sha"], "c" * 40)
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.client.refs["me/demo"], "a" * 40)
+        self.assertEqual(self.client.forced_refs, [])
+        self.client.calls.clear()
+        engine.run_cycle(self.db, self.client)
+        self.assertFalse(any(c[0] in ("update_ref", "merge_commit") for c in self.client.calls))
+
 
     def test_persistent_missing_object_is_bounded_and_keeps_error_backoff(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
@@ -371,10 +385,11 @@ class EngineTests(unittest.TestCase):
         self.client.compare_result = {"ahead_by": 1, "behind_by": 1}
         self.client.merge_error["me/demo"] = RefObjectNotFound("Object does not exist")
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "error")
+        self.assertEqual(self.status(), "paused")
         self.assertFalse(any(call[0] == "update_ref" for call in self.client.calls))
         self.assertNotIn(("get_ref", "up/demo"), self.client.calls)
         self.assertEqual(self.client.forced_refs, [])
+
 
     def test_missing_object_recovery_does_not_escalate_workflow_permissions(self):
         from app.github import Forbidden
@@ -439,8 +454,9 @@ class EngineTests(unittest.TestCase):
         self.client.compare_result = {"ahead_by": 5, "behind_by": 2,
                                       "files": [{"filename": "README.md"}]}
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        self.assertIn("2 个独有提交", self.row()["last_error"])
+        self.assertEqual(self.status(), "paused")
+        self.assertIn("2 个上游没有的提交", self.row()["last_error"])
+
 
     def test_forbidden_with_no_common_ancestor_marks_diverged(self):
         from app.github import Forbidden
@@ -449,8 +465,9 @@ class EngineTests(unittest.TestCase):
         self.client.ref_error["me/demo"] = Forbidden("Resource not accessible by integration")
         self.client.compare_result = None
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        self.assertIn("无共同祖先", self.row()["last_error"])
+        self.assertEqual(self.status(), "paused")
+        self.assertIn("无法确认提交包含关系", self.row()["last_error"])
+
 
     def test_error_repo_retried_only_after_backoff(self):
         self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
@@ -664,208 +681,63 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(client.installation_id)
 
 
-class ManualModeTests(unittest.TestCase):
-    """手工 fork mode: keep fork-unique commits, merge upstream in."""
+class PersonalCommitProtectionTests(unittest.TestCase):
+    setUp = EngineTests.setUp
+    row = EngineTests.row
 
-    def setUp(self):
-        backup = mock.patch("app.engine.ensure_backup", return_value={"status": "ready"})
-        backup.start()
-        self.addCleanup(backup.stop)
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.db = DB(Path(self.tmp.name) / "test.db")
-        self.client = StubGitHub()
-        self.repo_id = insert_repository(
-            self.db, owner="me", name="demo", full_name="me/demo",
-            upstream_full_name="up/demo", node_id="N1")
-        self.db.run("UPDATE repositories SET mode='manual' WHERE id=?", (self.repo_id,))
+    def test_upgrade_disables_legacy_custom_sync_and_new_imports_are_safe(self):
+        self.assertEqual(self.row()["mode"], "safe")
+        self.db.run("UPDATE repositories SET mode='manual', enabled=1, sync_requested=1, self_update_interval=1")
+        self.db.init()
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertEqual(self.row()["enabled"], 0)
+        self.assertEqual(self.row()["sync_requested"], 0)
+        self.assertIsNone(self.row()["self_update_interval"])
+        self.db.init()
+        self.assertEqual(self.row()["mode"], "protected")
 
-    def row(self):
-        return self.db.one("SELECT * FROM repositories WHERE id=?", (self.repo_id,))
+    def test_unique_or_uncertain_history_stops_every_legacy_mode(self):
+        for mode in ("safe", "mirror", "manual"):
+            for comparison in ({"ahead_by": 0, "behind_by": 7},
+                               {"ahead_by": 9, "behind_by": 13}, None, {},
+                               {"ahead_by": 1, "behind_by": False}):
+                with self.subTest(mode=mode, comparison=comparison):
+                    self.db.run("UPDATE repositories SET mode=?,enabled=1,status='pending',sync_requested=1,deletion_protection=0,self_update_interval=1", (mode,))
+                    self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a"*40, "b"*40)
+                    self.client.refs["me/demo"] = "a"*40
+                    self.client.compare_result = comparison
+                    self.client.calls.clear()
+                    engine.run_cycle(self.db, self.client)
+                    self.assertEqual(self.row()["mode"], "protected")
+                    self.assertEqual(self.row()["enabled"], 0)
+                    self.assertEqual(self.row()["status"], "paused")
+                    self.assertIsNone(self.row()["self_update_interval"])
+                    self.assertFalse(any(c[0] in ("update_ref", "merge_commit", "dispatch_workflow") for c in self.client.calls))
+                    self.assertEqual(self.client.refs["me/demo"], "a"*40)
 
-    def status(self):
-        return self.row()["status"]
+    def test_protected_mode_cannot_be_bypassed_by_direct_forced_sync(self):
+        self.db.run("UPDATE repositories SET mode='protected',enabled=1,sync_requested=1")
+        n = node("N1", "me/demo", "up/demo", "a"*40, "b"*40)
+        self.assertEqual(engine.sync_one(self.db, self.client, self.row(), n, forced=True), "paused")
+        self.assertEqual(self.client.calls, [])
 
-    def test_fork_ahead_of_upstream_merges_and_keeps_unique_commits(self):
-        # Fork has its own commits (behind_by>0) and upstream advanced: mirror
-        # mode would freeze as diverged; manual mode must merge instead.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
+    def test_no_unique_commits_fast_forwards_in_legacy_manual_mode(self):
+        self.db.run("UPDATE repositories SET mode='manual'")
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a"*40, "b"*40)
+        self.client.compare_result = {"ahead_by": 3, "behind_by": 0}
         engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertIn(("merge_commit", "me/demo", "main", "b" * 40), self.client.calls)
-        self.assertEqual(self.row()["last_merged_upstream_sha"], "b" * 40)
-        self.assertEqual(self.row()["fork_sha"], "f" * 40)
-
-    def test_upstream_advance_merges_even_when_fork_has_unique_commits(self):
-        self.db.run("UPDATE repositories SET last_merged_upstream_sha=? WHERE id=?",
-                    ("b" * 40, self.repo_id))
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "d" * 40)
-        self.client.compare_result = {"ahead_by": 1, "behind_by": 3}
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertIn(("merge_commit", "me/demo", "main", "d" * 40), self.client.calls)
-
-    def test_already_contains_upstream_is_quiet(self):
-        # compare says upstream head is an ancestor (ahead_by==0): record the
-        # marker without calling merge-upstream again.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 0, "behind_by": 2}
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
+        self.assertEqual(self.row()["status"], "synced")
+        self.assertEqual(self.client.refs["me/demo"], "b"*40)
         self.assertFalse(any(c[0] == "merge_commit" for c in self.client.calls))
-        self.assertEqual(self.row()["last_merged_upstream_sha"], "b" * 40)
-        # The fork's own commits are counted so the list can say why the two
-        # version lines differ while nothing needs syncing.
-        self.assertEqual(self.row()["upstream_ahead"], 0)
-        self.assertEqual(self.row()["fork_ahead"], 2)
+        self.assertFalse(self.client.forced_refs)
 
-    def test_merge_records_counts_including_the_merge_commit(self):
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
-        self.client.merge_result = {"merge_type": "merge", "message": "merged"}
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        row = self.row()
-        # Upstream is inside the fork now, and the merge commit itself is one
-        # more commit the fork has and upstream does not.
-        self.assertEqual(row["upstream_ahead"], 0)
-        self.assertEqual(row["fork_ahead"], 4)
-
-    def test_fast_forward_merge_leaves_no_own_commits(self):
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 0}
-        self.client.merge_result = {"merge_type": "fast-forward", "message": "ok"}
-        engine.run_cycle(self.db, self.client)
-        row = self.row()
-        self.assertEqual(row["upstream_ahead"], 0)
-        self.assertEqual(row["fork_ahead"], 0)
-
-    def test_stable_fork_backfills_counts_once(self):
-        """加列之前就已稳定的 fork：一次 compare 补上计数，之后不再探测。"""
-        self.db.run("UPDATE repositories SET status='synced', fork_sha=?, upstream_sha=?, "
-                    "last_merged_upstream_sha=? WHERE id=?",
-                    ("c" * 40, "b" * 40, "b" * 40, self.repo_id))
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 0, "behind_by": 15}
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.row()["fork_ahead"], 15)
-        self.assertEqual(self.status(), "synced")
-        probes = sum(1 for c in self.client.calls if c[0] == "compare")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "compare"), probes)
-
-    def test_failed_count_probe_is_not_retried_every_cycle(self):
-        self.db.run("UPDATE repositories SET status='synced', fork_sha=?, upstream_sha=?, "
-                    "last_merged_upstream_sha=? WHERE id=?",
-                    ("c" * 40, "b" * 40, "b" * 40, self.repo_id))
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
+    def test_compare_failure_blocks_even_with_deletion_protection_disabled(self):
+        self.db.run("UPDATE repositories SET deletion_protection=0")
+        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a"*40, "b"*40)
         self.client.compare_error = True
         engine.run_cycle(self.db, self.client)
-        self.assertIsNone(self.row()["fork_ahead"])
-        probes = sum(1 for c in self.client.calls if c[0] == "compare")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "compare"), probes)
-        self.assertEqual(self.status(), "synced")
-
-    def test_same_sha_is_quiet(self):
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "a" * 40)
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertFalse(any(c[0] == "merge_commit" for c in self.client.calls))
-        self.assertFalse(any(c[0] == "compare" for c in self.client.calls))
-
-    def test_merge_conflict_diverged_and_retries_when_upstream_advances(self):
-        from app.github import MergeConflict
-
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
-        self.client.merge_error["me/demo"] = MergeConflict("409 conflict")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "diverged")
-        attempts = sum(1 for c in self.client.calls if c[0] == "merge_commit")
-        engine.run_cycle(self.db, self.client)  # same upstream: sticky, no retry
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "merge_commit"), attempts)
-        # upstream advances -> retried
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "c" * 40)
-        self.client.merge_error["me/demo"] = MergeConflict("409 conflict")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "merge_commit"), attempts + 1)
-        # manual sync forces a retry regardless
-        self.db.run("UPDATE repositories SET sync_requested=1 WHERE id=?", (self.repo_id,))
-        self.client.merge_error["me/demo"] = MergeConflict("409 conflict")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(sum(1 for c in self.client.calls if c[0] == "merge_commit"), attempts + 2)
-
-    def test_workflow_forbidden_reports_permission_message(self):
-        from app.github import Forbidden
-
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 5, "behind_by": 3}
-        self.client.merge_error["me/demo"] = Forbidden(
-            "refusing to allow a GitHub App to create or update workflow without workflows permission")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "error")
-        self.assertIn("Workflows 权限", self.row()["last_error"])
-
-    def test_manual_sync_button_forces_merge_even_when_marker_matches(self):
-        self.db.run("UPDATE repositories SET last_merged_upstream_sha=?, sync_requested=1 WHERE id=?",
-                    ("b" * 40, self.repo_id))
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "c" * 40, "b" * 40)
-        self.client.compare_result = {"ahead_by": 1, "behind_by": 2}
-        engine.run_cycle(self.db, self.client)
-        self.assertIn(("merge_commit", "me/demo", "main", "b" * 40), self.client.calls)
-
-    def test_probe_failure_blocks_merge_when_deletion_scope_is_unknown(self):
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40)
-        self.client.compare_error = True
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "needs_attention")
-        self.assertFalse(any(call[0] == "merge_commit" for call in self.client.calls))
-        self.assertIn("检测未完成", self.row()["last_error"])
-
-    def test_mismatched_branch_uses_same_named_upstream_ref(self):
-        # Fork default "rm" vs upstream default "master": merge-upstream sources
-        # the upstream branch with the SAME name, so when that ref matches the
-        # fork it is already synced (this is the real v2ray layout).
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
-                                       fork_branch="rm", parent_branch="master")
-        self.client.refs["up/demo"] = "a" * 40  # upstream rm == fork rm
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "synced")
-        self.assertEqual(self.row()["branch"], "rm")
-        self.assertFalse(any(c[0] == "merge_commit" for c in self.client.calls))
-        self.assertEqual(self.row()["upstream_sha"], "a" * 40)
-
-    def test_mismatched_branch_without_upstream_ref_is_diagnosed(self):
-        # Fork default "master", upstream has no master (real SMSBoom layout):
-        # no merge is attempted; the actionable diagnosis is recorded instead.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
-                                       fork_branch="master", parent_branch="main")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "needs_attention")
-        self.assertEqual(self.row()["branch"], "master")
-        self.assertIn("上游没有与 fork 默认分支同名的分支 master", self.row()["last_error"])
-        self.assertFalse(any(c[0] == "merge_commit" for c in self.client.calls))
-
-    def test_transient_upstream_ref_failure_is_an_error_not_missing_branch(self):
-        # A flaky upstream read (network/5xx) must not be reported as "upstream
-        # has no same-named branch" (the real zzusec/v2ray false alarm).
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
-                                       fork_branch="rm", parent_branch="master")
-        self.client.get_ref_error["up/demo"] = RuntimeError("HTTP 502")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "error")
-        self.assertIn("读取上游分支 rm 失败", self.row()["last_error"])
-        self.assertNotIn("没有与 fork 默认分支同名", self.row()["last_error"])
-
-    def test_missing_upstream_ref_uses_dedicated_not_found_error(self):
-        # A genuine 404 (branch really absent) is still diagnosed as missing.
-        self.client.nodes["N1"] = node("N1", "me/demo", "up/demo", "a" * 40, "b" * 40,
-                                       fork_branch="rm", parent_branch="master")
-        engine.run_cycle(self.db, self.client)
-        self.assertEqual(self.status(), "needs_attention")
-        self.assertIn("上游没有与 fork 默认分支同名的分支 rm", self.row()["last_error"])
+        self.assertEqual(self.row()["mode"], "protected")
+        self.assertFalse(any(c[0] == "update_ref" for c in self.client.calls))
 
 
 class SelfUpdateTests(unittest.TestCase):

@@ -597,17 +597,15 @@ def _backup_guard(db, client, row, fork_sha, target_sha=None):
 
 def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forced,
                  version=None):
-    """Manual-fork mode: keep fork-unique commits, merge upstream in (Sync fork).
+    """Compatibility path for legacy rows: only fast-forward after ancestry checks.
 
-    Unlike mirror mode this never marks diverged: commits produced in the fork
-    (its own Actions, local edits) are preserved, and upstream advances are
-    folded in with a server-side merge of the exact reviewed commit. The caller
-    tracks the upstream branch with the same name as the fork's default branch.
-    A compare probe first tells apart "already contains
-    upstream" (record and stay quiet) from real work.
+    Persistent legacy manual rows migrate to protected on startup. This path
+    still fails closed for callers holding an older row in memory.
     """
     repo_id = row["id"]
     version = version or {}
+    if not _fast_forward_guard(db, client, row, fork_sha, upstream_sha):
+        return "paused"
     if fork_sha == upstream_sha:
         # Same commit: both sides agree, so both counts are zero.
         version = {**version, "upstream_ahead": 0, "fork_ahead": 0}
@@ -661,7 +659,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
                            comparison=payload if isinstance(payload, dict) else "unavailable"):
         return "needs_attention"
     try:
-        result = client.merge_commit(row["full_name"], fork_branch, upstream_sha)
+        client.update_ref(row["full_name"], fork_branch, upstream_sha, force=False)
+        result = {"sha": upstream_sha, "merge_type": "fast-forward"}
         confirmed = client.get_ref(row["full_name"], fork_branch)
         merge_type = (result or {}).get("merge_type")
         if merge_type != "none" and confirmed != (result or {}).get("sha"):
@@ -684,6 +683,8 @@ def _sync_manual(db, client, row, fork_branch, fork_sha, upstream_sha, now, forc
         log_event(db, repo_id, "synced",
                   f"{row['full_name']} {label}上游 {upstream_sha[:12]}（保留 fork 自有提交）")
         return "synced"
+    except RefNotFastForward:
+        return _protect_repository(db, row, "远端拒绝非快进更新，已禁止同步；不会强制覆盖或自动合并。")
     except MergeConflict as error:
         # A conflict is a stable state, not a failure: the fork keeps its own
         # commits and its own Actions keep updating it; the upstream merge is
@@ -757,21 +758,54 @@ def _classify_forbidden(db, client, row, upstream_sha, error, version=None):
     return "error"
 
 
-def _update_mirror_ref(client, row, upstream_sha, fork_sha):
-    """Only a confirmed non-fast-forward permits the mirror's force update."""
-    try:
-        client.update_ref(row["full_name"], row["branch"], upstream_sha)
-        return False
-    except RefNotFastForward:
-        if client.get_ref(row["full_name"], row["branch"]) != fork_sha:
-            raise RuntimeError("fork HEAD 在强制对齐前已变化，已取消本次同步，请重新检查")
-        client.update_ref(row["full_name"], row["branch"], upstream_sha, force=True)
+def _update_fast_forward(client, row, upstream_sha, fork_sha):
+    """The server must enforce fast-forward even if the observed HEAD is stale."""
+    client.update_ref(row["full_name"], row["branch"], upstream_sha, force=False)
+
+
+
+def _protect_repository(db, row, message, fork_sha=None, upstream_sha=None, counts=None):
+    fields = dict(enabled=0, mode="protected", status="paused", sync_requested=0,
+                  self_update_interval=None, deletion_approval=None,
+                  last_check_at=utcnow(), last_error=message)
+    if fork_sha:
+        fields["fork_sha"] = fork_sha
+    if upstream_sha:
+        fields["upstream_sha"] = upstream_sha
+    fields.update(counts or {})
+    _set_repo(db, row["id"], **fields)
+    if row["mode"] != "protected" or row["last_error"] != message:
+        log_event(db, row["id"], "blocked", f"{row['full_name']} {message}")
+    return "paused"
+
+
+def _fast_forward_guard(db, client, row, fork_sha, upstream_sha):
+    """Unique commits, unrelated history and uncertain comparisons all fail closed."""
+    if fork_sha == upstream_sha:
         return True
+    try:
+        comparison = client.compare(row["full_name"], fork_sha, upstream_sha)
+    except (AuthError, RateLimited):
+        raise
+    except Exception:
+        comparison = None
+    if not valid_comparison(comparison):
+        _protect_repository(db, row, "无法确认提交包含关系，已禁止自动同步；请人工检查历史。",
+                            fork_sha, upstream_sha)
+        return False
+    if comparison["behind_by"]:
+        _protect_repository(db, row,
+                            f"检测到 {comparison['behind_by']} 个上游没有的提交，已禁止自动同步，保留全部改动。",
+                            fork_sha, upstream_sha, _count_fields(comparison))
+        return False
+    return True
 
 
 def sync_one(db, client, row, node, forced=False):
     """Apply one repository's observed state. Returns final status."""
     repo_id = row["id"]
+    if row["mode"] == "protected":
+        return _protect_repository(db, row, "独立维护仓库：禁止自动同步上游。")
     if node is None:
         if row["status"] != "missing":
             log_event(db, repo_id, "blocked", f"{row['full_name']} 无法访问，标记 missing")
@@ -859,7 +893,7 @@ def sync_one(db, client, row, node, forced=False):
         status = _sync_manual(db, client, row, fork_branch,
                               fork_ref["target"]["oid"], upstream_sha, utcnow(), forced,
                               version=version)
-        if row["self_update_interval"] and status != "needs_attention":
+        if row["self_update_interval"] and status == "synced":
             _self_update(db, client, row, utcnow(), forced)
         return status
     if fork_branch != row["branch"] or parent_branch != row["branch"]:
@@ -871,7 +905,7 @@ def sync_one(db, client, row, node, forced=False):
             fields["last_error"] = f"默认分支已变为 {fork_branch}，点恢复后将在该分支继续同步"
         else:
             fields["last_error"] = (f"默认分支不一致（fork {fork_branch} vs 上游 {parent_branch}）；"
-                                    "切换为手工 fork 模式将按同名分支自动合并")
+                                    "请人工核对分支；不会自动合并或覆盖")
         if row["status"] != "needs_attention":
             log_event(db, repo_id, "blocked",
                       f"{row['full_name']} 默认分支变化（{fork_branch} vs {parent_branch}），暂停等待确认")
@@ -888,12 +922,14 @@ def sync_one(db, client, row, node, forced=False):
                   last_check_at=now, last_success_at=now, last_error=None,
                   deletion_review=None, deletion_approval=None, **version)
         return "synced"
+    if not _fast_forward_guard(db, client, row, fork_sha, upstream_sha):
+        return "paused"
     if not _deletion_guard(db, client, row, fork_sha, upstream_sha):
         return "needs_attention"
     try:
         recovered_object = False
         try:
-            force_aligned = _update_mirror_ref(client, row, upstream_sha, fork_sha)
+            _update_fast_forward(client, row, upstream_sha, fork_sha)
         except RefObjectNotFound:
             # The batched observation may be stale; refresh once, without
             # treating an unavailable object as permission to force a ref.
@@ -902,28 +938,27 @@ def sync_one(db, client, row, node, forced=False):
                 version = {"fork_tag": None, "upstream_tag": None,
                            "fork_commit_at": None, "upstream_commit_at": None}
             upstream_sha = refreshed_sha
+            if not _fast_forward_guard(db, client, row, fork_sha, upstream_sha):
+                return "paused"
             if not _deletion_guard(db, client, row, fork_sha, upstream_sha):
                 return "needs_attention"
-            force_aligned = _update_mirror_ref(client, row, upstream_sha, fork_sha)
+            _update_fast_forward(client, row, upstream_sha, fork_sha)
             recovered_object = True
         confirmed = client.get_ref(row["full_name"], row["branch"])
         if confirmed != upstream_sha:
             raise RuntimeError(f"推送后 fork HEAD {confirmed[:12]} 与目标 {upstream_sha[:12]} 不一致")
-        aligned_fields = {"diverged_at": None, "diverged_upstream_sha": None} if force_aligned else {}
         _set_repo(db, repo_id, status="synced", fork_sha=upstream_sha, upstream_sha=upstream_sha,
                   upstream_ahead=0, fork_ahead=0,
                   last_check_at=utcnow(), last_success_at=utcnow(), last_error=None,
                   deletion_review=None, deletion_approval=None,
-                  **aligned_fields, **version)
-        if force_aligned:
-            message = (f"{row['full_name']} 已强制对齐到上游 {upstream_sha[:12]}"
-                       "（镜像模式，不保留 fork 自有提交）")
-        else:
-            message = f"{row['full_name']} 快进到 {upstream_sha[:12]}"
+                  diverged_at=None, diverged_upstream_sha=None, **version)
+        message = f"{row['full_name']} 快进到 {upstream_sha[:12]}"
         if recovered_object:
             message += "（已刷新上游提交并自动恢复）"
         log_event(db, repo_id, "synced", message)
         return "synced"
+    except RefNotFastForward:
+        return _protect_repository(db, row, "远端拒绝非快进更新，已禁止同步；不会强制覆盖或自动合并。")
     except Forbidden as error:
         return _classify_forbidden(db, client, row, upstream_sha, error, version)
     except (RateLimited, AuthError):

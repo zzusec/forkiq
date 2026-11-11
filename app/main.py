@@ -114,6 +114,8 @@ def is_secure(request):
     return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
 
 
+
+
 def render(request, name, **context):
     token = request.cookies.get("forkiq_session", "")
     context.update(csrf=csrf_for(token) if token else "",
@@ -571,6 +573,8 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
         return JSONResponse({"error": "仓库不存在"}, status_code=404)
     if repo["restore_backup_id"] is not None:
         return JSONResponse({"error": "回滚正在处理，请等待完成后再操作"}, status_code=409)
+    if repo["mode"] == "protected" and action in ("resume", "sync", "selfupdate"):
+        return JSONResponse({"error": "独立维护仓库已禁止上游同步。需先切换为安全同步；检测到独有提交仍会停止。"}, status_code=409)
     if action == "pause":
         db.run("UPDATE repositories SET status='paused', enabled=0, deletion_approval=NULL, updated_at=? WHERE id=?",
                (utcnow(), repo_id))
@@ -583,12 +587,13 @@ def _repo_action(request, repo_id, csrf, action, return_filter=None):
         db.run("UPDATE repositories SET sync_requested=1, updated_at=? WHERE id=?", (utcnow(), repo_id))
         worker.request_sync()
     elif action == "mode":
-        mode = "manual" if repo["mode"] == "mirror" else "mirror"
-        db.run("UPDATE repositories SET mode=?, status='pending', last_error=NULL, "
-               "diverged_at=NULL, diverged_upstream_sha=NULL, sync_requested=1, "
+        mode = "safe" if repo["mode"] == "protected" else "protected"
+        enabled = int(mode == "safe")
+        db.run("UPDATE repositories SET mode=?, enabled=?, status=?, last_error=NULL, "
+               "diverged_at=NULL, diverged_upstream_sha=NULL, sync_requested=?, self_update_interval=NULL, "
                "deletion_review=NULL, deletion_approval=NULL, "
-               "updated_at=? WHERE id=?", (mode, utcnow(), repo_id))
-        label = "手工 fork（保留自有提交，上游更新自动合并）" if mode == "manual" else "镜像（严格跟随上游，不留 fork 自有提交）"
+               "updated_at=? WHERE id=?", (mode, enabled, "pending" if enabled else "paused", enabled, utcnow(), repo_id))
+        label = "独立维护（禁止同步上游）" if mode == "protected" else "安全同步（仅快进，有独有提交立即停止）"
         log_event(db, repo_id, "check", f"{repo['full_name']} 同步方式切换为{label}")
         worker.request_sync()
     elif action == "selfupdate":
