@@ -56,12 +56,12 @@
             <input type="hidden" name="csrf" value="{{ csrf }}">
             <div class="setting-field">
               <label for="sync-interval">上游检查间隔</label>
-              <div class="input-unit"><input id="sync-interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="0.25" max="5" step="any" required aria-describedby="sync-interval-help"><span>分钟</span></div>
-              <p id="sync-interval-help" class="field-help">每轮检查后等待此间隔（0.25–5 分钟）。仅检查已受管且未暂停的仓库。</p>
+              <div class="input-unit"><input id="sync-interval" type="number" name="interval_minutes" value="{{ interval_minutes }}" min="0.25" step="any" required aria-describedby="sync-interval-help"><span>分钟</span></div>
+              <p id="sync-interval-help" class="field-help">每轮检查后等待此间隔，最短 0.25 分钟；可填 30、60 或 1440（每天）。仅检查已受管且未暂停的仓库。</p>
             </div>
             <div class="setting-field discovery-field">
               <label class="check" for="auto-discover"><input id="auto-discover" type="checkbox" name="auto_discover" value="1" {% if auto_discover %}checked{% endif %} aria-describedby="discovery-help">自动加入新 fork</label>
-              <p id="discovery-help" class="field-help">每 60 分钟扫描已授权的新 fork，加入后即安排同步。关闭不影响已有仓库。</p>
+              <p id="discovery-help" class="field-help">每 60 分钟到期后在下一轮扫描已授权的新 fork；较长检查间隔会延后扫描，加入后即安排同步。关闭不影响已有仓库。</p>
             </div>
             <button class="primary">保存同步设置</button>
           </form>
