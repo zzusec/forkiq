@@ -11,6 +11,9 @@ WorkingDirectory=/opt/forkiq
 # Only the local HTTPS reverse proxy may reach the application listener.
 ExecStart=/opt/forkiq/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8792 --workers 1
 Environment=FORKIQ_STATE_DIR=/var/lib/forkiq
+# Keep deployment-specific values outside the release tree. The bootstrap
+# script creates this file; an absent file is also valid for manual installs.
+EnvironmentFile=-/etc/forkiq/forkiq.env
 # Set your own public origin before creating the GitHub App (no subpath).
 # Environment=FORKIQ_PUBLIC_URL=https://fork.example.com
 # App private key lives in the service's own state dir: the sandbox makes /etc
@@ -19,6 +22,8 @@ Environment=FORKIQ_PEM_PATH=/var/lib/forkiq/app.pem
 Environment=PYTHONUNBUFFERED=1
 TimeoutStopSec=10s
 KillMode=control-group
+Restart=on-failure
+RestartSec=5s
 UMask=0077
 Nice=5
 CPUQuota=25%

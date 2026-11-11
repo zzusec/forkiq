@@ -1,0 +1,34 @@
+services:
+  forkiq:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: forkiq:local
+    restart: unless-stopped
+    environment:
+      FORKIQ_PUBLIC_URL: ${FORKIQ_PUBLIC_URL:?Set the public HTTPS origin}
+      FORWARDED_ALLOW_IPS: ${FORKIQ_PROXY_IP:?Set the Caddy container IP}
+    volumes:
+      - /var/lib/forkiq:/state
+    networks:
+      gateway:
+        aliases: [forkiq]
+    mem_limit: 1g
+    cpus: 1
+    pids_limit: 128
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8792/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+networks:
+  gateway:
+    external: true
+    name: ${FORKIQ_PROXY_NETWORK:?Set the existing reverse-proxy Docker network}

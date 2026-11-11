@@ -1127,6 +1127,21 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["location"], "/login")
 
+    def test_public_https_proxy_sets_security_headers_and_secure_session_cookie(self):
+        response = self.client.post(
+            "/setup", data={"password": TEST_PASSWORD, "password2": TEST_PASSWORD},
+            headers={"x-forwarded-proto": "https"})
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post("/login", data={"password": TEST_PASSWORD},
+                                    headers={"x-forwarded-proto": "https"})
+        cookie = response.headers["set-cookie"]
+        self.assertIn("Secure", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertEqual(response.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(response.headers["x-frame-options"], "DENY")
+        self.assertIn("max-age=31536000", response.headers["strict-transport-security"])
+
+
     def test_login_failure_and_rate_limit(self):
         self.client.post("/setup", data={"password": TEST_PASSWORD, "password2": TEST_PASSWORD})
         for _ in range(5):

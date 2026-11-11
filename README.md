@@ -81,14 +81,52 @@ App 需要的权限：`contents: write`、`administration: write`、`workflows: 
 
 ## 部署
 
-`deploy/bootstrap.sh` 在干净的 Linux 主机上创建 `forkiq` 服务账号与目录，`deploy/forkiq.service` 是 systemd 单元（只监听 `127.0.0.1:8792`，由同机 HTTPS 反向代理访问）。把代码放到 `/opt/forkiq`、装好依赖并安装 service 单元后，用 `systemctl edit forkiq` 配置自己的地址：
+ForkIQ 的同步 Worker 常驻在 Web 服务内，会按设置页的间隔检查上游；不需要额外的 cron。新版本默认每 30 秒唤醒一次，只有到达仓库检查时间才调用 GitHub API，最短 15 秒、最长 5 分钟。即使你的目标是“每天同步一次”，也只需让服务保持运行：上游更新后会在下一轮检查自动合并，服务重启后也会继续使用数据库里的设置，不会丢失已发现仓库。
 
-```ini
-[Service]
-Environment=FORKIQ_PUBLIC_URL=https://fork.example.com
+在干净的 Debian/Ubuntu 主机上，一条命令即可从当前 checkout 或解压后的发布包完成安装（脚本会复制应用、创建虚拟环境、安装 systemd 单元和配置文件）：
+
+```sh
+sudo deploy/bootstrap.sh                 # 默认使用当前 ForkIQ 目录
+# 或 sudo deploy/bootstrap.sh /srv/forkiq-v1.0.0
+sudo editor /etc/forkiq/forkiq.env       # 填 FORKIQ_PUBLIC_URL=https://fork.example.com
+sudo systemctl start forkiq.service
 ```
 
-然后启动服务；修改已有服务的地址时，执行 `systemctl restart forkiq` 使环境变量生效：
+### 公网 HTTPS 与密码
+
+不要把 Uvicorn 端口直接暴露到公网。服务只监听 `127.0.0.1:8792`，前面放 Caddy 或 Nginx 终止 HTTPS。Caddy 配置最简单：
+
+```sh
+sudo editor /etc/caddy/Caddyfile
+# 参考 deploy/Caddyfile.example 添加站点，保留现有站点配置
+# 把 fork.example.com 改成你的域名；验证配置后再重载
+sudo systemctl reload caddy
+```
+
+如果使用 Nginx，参考 [nginx-forkiq.conf.example](deploy/nginx-forkiq.conf.example)，并使用 Certbot 或现有证书配置 `ssl_certificate`。反向代理必须传递 `Host`、`X-Forwarded-For` 和 `X-Forwarded-Proto: https`；模板已经包含这些头。公网地址、GitHub App 回调地址和证书域名必须完全一致。
+
+首次访问 `https://你的域名/setup` 设置管理员密码，密码至少 8 位。密码使用 scrypt 加盐哈希保存，登录会话是 HttpOnly、SameSite=Lax、HTTPS 下 Secure 的 7 天 Cookie；设置密码后 `/setup` 自动失效。密码修改入口在“系统设置”，修改后所有旧会话都会注销。首次初始化采用数据库写锁，多个公网访问者同时打开设置页也只有一个密码能生效。
+
+登录失败按客户端 IP 限流；通过本机反向代理时，ForkIQ 只采信代理传入的第一个 `X-Forwarded-For` 地址，直接访问本地服务时不会信任外部伪造的转发头。
+
+脚本只用于全新主机，会拒绝覆盖已有 `/opt/forkiq`、`/var/lib/forkiq` 或 systemd 单元。升级时不要重新运行 bootstrap，以免覆盖数据库和 App 私钥。使用随项目提供的更新脚本，它会先保留旧版本，依赖或服务启动失败时自动回滚：
+
+```sh
+sudo deploy/update.sh /srv/forkiq-new
+```
+
+脚本只替换 `/opt/forkiq` 的应用代码并保留 `.venv`，`/var/lib/forkiq` 始终单独保留。部署包内的 `deploy/forkiq.env.example` 是配置模板，真实配置位于 `/etc/forkiq/forkiq.env`，不会随代码更新覆盖。
+
+`deploy/forkiq.service` 只监听 `127.0.0.1:8792`，由同机 HTTPS 反向代理访问。也可以不用 bootstrap，手工把代码放到 `/opt/forkiq` 后安装 service 单元，再用 `/etc/forkiq/forkiq.env` 配置地址：
+
+```sh
+sudo install -m 0644 deploy/forkiq.service /etc/systemd/system/forkiq.service
+sudo install -d -m 0750 -o root -g forkiq /etc/forkiq
+sudo install -m 0640 -o root -g forkiq deploy/forkiq.env.example /etc/forkiq/forkiq.env
+sudo systemctl daemon-reload && sudo systemctl enable --now forkiq.service
+```
+
+修改已有服务的地址时，执行 `systemctl restart forkiq` 使环境变量生效：
 
 ```sh
 systemctl daemon-reload && systemctl enable --now forkiq

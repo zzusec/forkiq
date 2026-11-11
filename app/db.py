@@ -167,6 +167,25 @@ class DB:
         self.run("INSERT INTO settings(key,value) VALUES(?,?) "
                  "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
+    def setup_admin(self, password_hash):
+        """Atomically claim first-run setup, so two public clients cannot race."""
+        conn = self.connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM settings WHERE key='setup_done' AND value='1'").fetchone():
+                conn.rollback()
+                return False
+            conn.execute("INSERT INTO settings(key,value) VALUES('admin_pass_hash',?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (password_hash,))
+            conn.execute("INSERT INTO settings(key,value) VALUES('setup_done','1') "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+
+
 
 def log_event(db, repo_id, kind, message):
     db.run("INSERT INTO events(repo_id, at, kind, message) VALUES(?,?,?,?)",
