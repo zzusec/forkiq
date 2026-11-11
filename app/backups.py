@@ -91,6 +91,50 @@ def verified_backup(db, record):
         return False
 
 
+def delete_backup(db, backup_id, repo_id=None):
+    """Remove one verified backup file and row while the backup lock is held.
+
+    The bundle is moved to a private temporary name before the database row is
+    committed. If the row cannot be removed, it is put back so a failed delete
+    never leaves a database entry pointing at a missing snapshot.
+    """
+    try:
+        root = _root(db)
+    except OSError:
+        raise BackupError("备份目录缺失或无法访问，未删除记录") from None
+    with _locked(root):
+        record = db.one("SELECT * FROM repository_backups WHERE id=?", (backup_id,))
+        if record is None or (repo_id is not None and record["repo_id"] != repo_id):
+            raise BackupError("备份不存在")
+        path = backup_path(db, record)
+        if path.is_symlink() or not path.is_file():
+            raise BackupError("备份文件缺失或异常，未删除记录")
+        temporary = root / f".deleting-{int(backup_id)}.bundle"
+        if temporary.exists() or temporary.is_symlink():
+            raise BackupError("另一个备份删除正在处理，请稍后重试")
+        os.replace(path, temporary)
+        try:
+            if repo_id is None:
+                deleted = db.run("DELETE FROM repository_backups WHERE id=?", (backup_id,)).rowcount
+            else:
+                deleted = db.run(
+                    "DELETE FROM repository_backups WHERE id=? AND repo_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM repositories WHERE id=? AND restore_backup_id=?)",
+                    (backup_id, repo_id, repo_id, backup_id)).rowcount
+            if not deleted:
+                raise BackupError("备份正在回滚或已被删除，请刷新后重试")
+        except Exception:
+            os.replace(temporary, path)
+            raise
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # The database row is already gone; leave a private orphan for the
+            # next maintenance pass rather than reporting a false failure.
+            pass
+        return dict(record)
+
+
 @contextmanager
 def _locked(root):
     # Serialize retention and publication across both request threads and workers.
