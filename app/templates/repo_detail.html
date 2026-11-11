@@ -37,7 +37,9 @@
     <section class="card repo-sync-bar" aria-labelledby="repo-sync-title">
       <div><h2 id="repo-sync-title">上游同步{{ status(repo.status) }}</h2><p class="muted">{{ '已暂停，不再检查上游；GitHub Actions 不受影响。' if not repo.enabled or repo.status == 'paused' else '自动检查上游，有更新就尝试同步。' }}</p></div>
       <div class="actions">
-        {% if repo.enabled and repo.status != 'paused' %}
+        {% if repo.mode == 'protected' %}
+        <span class="tag tag-warn">独立维护 · 禁止同步</span>
+        {% elif repo.enabled and repo.status != 'paused' %}
         <form method="post" action="/repos/{{ repo.id }}/sync"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="primary">{{ icon('refresh-cw') }}立即同步</button></form>
         <form method="post" action="/repos/{{ repo.id }}/pause"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="secondary">{{ icon('pause') }}暂停同步</button></form>
         {% else %}
@@ -48,7 +50,7 @@
     </section>
     <section class="card" aria-labelledby="backups-title">
       <h2 id="backups-title">服务器备份 · 最近 3 份</h2>
-      <p class="field-help">首次检查建立基线，每次真正更新前再备份当前版本；相同提交只保留一份。备份失败不更新，异常删除仍先拦截。</p>
+      <p class="field-help">首次检查建立基线，每次真正更新前再备份当前版本；相同提交只保留一份。备份失败不更新；安全同步和强制同步均遵循异常删除保护设置。</p>
       {% if repo.restore_backup_id %}<p class="notice warn" role="status">回滚正在排队或执行，同步已暂停。完成后请刷新查看事件结果。</p>{% endif %}
       {% if backup_error %}<p class="notice warn" role="alert">备份未完成：{{ backup_error.last_error }}。约 10 分钟后重试；期间不更新 fork。</p>{% endif %}
       {% if backups %}
@@ -70,8 +72,9 @@
         <dt>上游</dt><dd>{{ repo_link(repo.upstream_full_name) }}{% if repo.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</dd>
         <dt>同步分支</dt><dd>{{ repo.branch }}</dd>
         <dt>同步方式</dt>
-        <dd>{% if repo.mode == 'manual' %}保留自有提交，自动合并上游更新。
-            {% else %}镜像：与上游对齐，不保留 fork 自有提交。{% endif %}</dd>
+        <dd>{% if repo.mode == 'protected' %}独立维护：禁止同步上游，保留自己的改动。
+            {% elif repo.mode == 'force' %}强制同步：备份后始终对齐上游，可覆盖独有提交；异常删除保护仍会拦截空树和大量删除。
+            {% else %}安全同步：只允许快进；发现独有提交或无法确认历史关系时自动禁止同步。{% endif %}</dd>
         <dt>自更新保活</dt>
         <dd>{% if repo.self_update_interval %}{{ repo.self_update or '已开启，等待检查' }}
             {% else %}未开启{% endif %}</dd>
@@ -86,14 +89,17 @@
       <details class="advanced-actions"><summary>高级操作</summary>
       <p class="field-help">以下操作会影响 GitHub 仓库或 Actions，不是暂停同步。</p>
       <div class="actions">
-        <form method="post" action="/repos/{{ repo.id }}/mode" {% if repo.mode == 'manual' %}class="confirm" data-confirm="切换为镜像后，同步会将分支对齐到上游，不再保留 fork 自有提交。确认切换？"{% endif %}>
+        <form method="post" action="/repos/{{ repo.id }}/mode">
           <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button class="secondary">{{ '切换为镜像模式' if repo.mode == 'manual' else '切换为手工 fork' }}</button>
+          <button class="secondary">{{ '切换为安全同步' if repo.mode in ('protected', 'force') else '设为独立维护（禁止同步）' }}</button>
         </form>
-        <form method="post" action="/repos/{{ repo.id }}/selfupdate">
+        {% if repo.mode != 'force' %}<a class="danger link" href="/repos/{{ repo.id }}/force-mode">切换为强制同步</a>{% else %}
+        <form method="post" action="/repos/{{ repo.id }}/mode"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="mode_choice" value="protected"><button class="secondary">设为独立维护（禁止同步）</button></form>
+        {% endif %}
+        {% if repo.mode == 'manual' %}<form method="post" action="/repos/{{ repo.id }}/selfupdate">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button class="secondary">{{ '关闭自更新' if repo.self_update_interval else '开启自更新保活' }}</button>
-        </form>
+        </form>{% endif %}
         <form method="post" action="/repos/{{ repo.id }}/actions">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="enabled" value="{{ '1' if repo.actions_disabled else '0' }}">
@@ -108,6 +114,7 @@
     </section>
     <section class="card" aria-labelledby="repo-protection-title">
       <h2 id="repo-protection-title">异常删除保护</h2>
+      {% if repo.mode == 'force' %}<p class="notice warn">强制同步仍使用以下异常删除保护：开启保护时，空树和大量删除需逐次确认；检测失败不能确认放行。它只放宽独有提交和历史分叉保护，更新前备份仍是必需的。</p>{% endif %}
       <p class="field-help">当前{{ '开启' if protection.enabled else '关闭' }}；删除超过 {{ protection.max_files }} 个文件或 {{ '%g' | format(protection.max_percent) }}% 时拦截。开启时始终拦截空文件树和检测失败。</p>
       <form method="post" action="/repos/{{ repo.id }}/protection" class="protection-form">
         <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -120,7 +127,7 @@
           <label for="repo-max-files">删除文件数阈值<input id="repo-max-files" type="number" name="max_files" min="0" max="1000000" step="1" value="{{ repo.deletion_max_files if repo.deletion_max_files is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
           <label for="repo-max-percent">删除比例阈值（%）<input id="repo-max-percent" type="number" name="max_percent" min="0" max="100" step="any" value="{{ repo.deletion_max_percent if repo.deletion_max_percent is not none else '' }}" placeholder="跟随系统" aria-describedby="repo-protection-help"></label>
         </div>
-        <p id="repo-protection-help" class="field-help">阈值留空即跟随系统。镜像按 fork 当前文件计数；手工合并按共同祖先核实删除，不计 fork 独有文件。重命名按旧路径删除计数。关闭将允许空树和大量删除。</p>
+        <p id="repo-protection-help" class="field-help">阈值留空即跟随系统。按 fork 当前文件计数，重命名按旧路径删除计数。关闭将允许空树和大量删除，但不会关闭安全同步的独有提交保护。</p>
         <button class="secondary">保存此仓库保护</button>
       </form>
     </section>

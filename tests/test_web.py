@@ -145,7 +145,7 @@ class WebTests(unittest.TestCase):
                   ("/repos", "/repos", ["/repos/add"]),
                   (f"/repos/{repo_id}", "/repos",
                    [f"/repos/{repo_id}/{action}" for action in
-                    ("sync", "mode", "selfupdate", "pause", "actions", "remove")]),
+                    ("sync", "mode", "pause", "actions", "remove")]),
                   ("/settings", "/settings",
                    ["/settings", "/settings/password", "/settings/disconnect"])]
         for path, active_path, actions in routes:
@@ -765,6 +765,28 @@ class WebTests(unittest.TestCase):
         remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
         self.assertTrue(remove_form["attrs"].get("data-confirm"))
 
+    def test_force_mode_requires_explicit_confirmation_and_preserves_filters(self):
+        token = self.setup_admin()
+        repo_id, _ = self.repository_with_backup()
+        self.main.db.run("UPDATE repositories SET mode='protected',enabled=0,status='paused' WHERE id=?", (repo_id,))
+        path = f"/repos/{repo_id}/mode"
+        data = {"csrf": self.csrf(token), "mode_choice": "force"}
+        with mock.patch.object(self.main.worker, 'request_sync') as wake:
+            self.assertEqual(self.client.post(path, data=data).status_code, 400)
+            wake.assert_not_called()
+            response, page = self.rendered_page(f"/repos/{repo_id}/force-mode")
+            self.assert_post_form(page, path, token)
+            self.assertIn('持续生效', response.text)
+            self.assertEqual(self.main.db.one('SELECT mode FROM repositories WHERE id=?', (repo_id,))['mode'], 'protected')
+            self.assertEqual(self.client.post(path, data={**data, 'confirmation':'force'}).status_code, 302)
+            wake.assert_called_once()
+        row = self.main.db.one('SELECT * FROM repositories WHERE id=?', (repo_id,))
+        self.assertEqual((row['mode'], row['enabled'], row['sync_requested']), ('force', 1, 1))
+        self.assertIn('me/demo', self.client.get('/repos?mode=force').text)
+        self.assertNotIn('me/demo', self.client.get('/repos?mode=safe').text)
+        self.main.db.run('UPDATE repositories SET restore_backup_id=1 WHERE id=?', (repo_id,))
+        self.assertEqual(self.client.post(path, data={**data, 'confirmation':'force'}).status_code, 409)
+
     def test_repository_detail_prioritizes_sync_and_groups_advanced_actions(self):
         token = self.setup_admin()
         from app.db import insert_repository
@@ -778,13 +800,10 @@ class WebTests(unittest.TestCase):
             self.assertNotIn("open", advanced["attrs"])
             for action in ("sync", "pause"):
                 self.assertTrue(page.inside(toolbar, "form", action=f"/repos/{repo_id}/{action}"))
-            for action in ("mode", "selfupdate", "actions", "remove"):
+            for action in ("mode", "actions", "remove"):
                 self.assertTrue(page.inside(advanced, "form", action=f"/repos/{repo_id}/{action}"))
             mode_form = self.assert_post_form(page, f"/repos/{repo_id}/mode", token)
-            if mode == "manual":
-                self.assertIn("不再保留 fork 自有提交", mode_form["attrs"].get("data-confirm", ""))
-            else:
-                self.assertNotIn("data-confirm", mode_form["attrs"])
+            self.assertNotIn("data-confirm", mode_form["attrs"])
             remove_form = self.assert_post_form(page, f"/repos/{repo_id}/remove", token)
             self.assertIn("自动发现", remove_form["attrs"]["data-confirm"])
 
@@ -1169,24 +1188,31 @@ class WebTests(unittest.TestCase):
         self.client.post(f"/repos/{repo_id}/remove", data={"csrf": self.csrf(token)})
         self.assertIsNone(self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,)))
 
-    def test_mode_toggle_switches_and_resets_state(self):
+    def test_mode_toggle_protects_and_safe_mode_always_rechecks(self):
         token = self.setup_admin()
         from app.db import insert_repository
         repo_id = insert_repository(self.main.db, owner="me", name="demo",
                                     full_name="me/demo", upstream_full_name="up/demo")
-        self.main.db.run("UPDATE repositories SET status='diverged', diverged_at='x', "
-                         "diverged_upstream_sha='y' WHERE id=?", (repo_id,))
-        response = self.client.post(f"/repos/{repo_id}/mode", data={"csrf": self.csrf(token)})
+        endpoint = f"/repos/{repo_id}"
+        response = self.client.post(endpoint + "/mode", data={"csrf": self.csrf(token)})
         self.assertEqual(response.status_code, 302)
         row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
-        self.assertEqual(row["mode"], "manual")
-        self.assertEqual(row["status"], "pending")
-        self.assertIsNone(row["diverged_at"])
-        self.assertEqual(row["sync_requested"], 1)
-        # toggling back returns to mirror mode
-        self.client.post(f"/repos/{repo_id}/mode", data={"csrf": self.csrf(token)})
+        self.assertEqual(row["mode"], "protected")
+        self.assertEqual(row["status"], "paused")
+        self.assertEqual(row["enabled"], 0)
+        self.assertEqual(row["sync_requested"], 0)
+        for action in ("sync", "resume", "selfupdate"):
+            self.assertEqual(self.client.post(endpoint + "/" + action,
+                             data={"csrf": self.csrf(token)}).status_code, 409)
+        _, page = self.rendered_page(endpoint)
+        self.assertFalse(page.find("form", action=endpoint + "/resume"))
+        self.assertFalse(page.find("form", action=endpoint + "/sync"))
+        self.client.post(endpoint + "/mode", data={"csrf": self.csrf(token)})
         row = self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
-        self.assertEqual(row["mode"], "mirror")
+        self.assertEqual(row["mode"], "safe")
+        self.assertEqual(row["enabled"], 1)
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["sync_requested"], 1)
 
     def test_selfupdate_toggle_enables_actions_and_permissions(self):
         token = self.setup_admin()
@@ -1362,6 +1388,40 @@ class WebTests(unittest.TestCase):
         self.assertEqual(stub.refs["me/demo"], "a" * 40)
         self.assertFalse(any(call[0] in ("update_ref", "merge_commit") for call in stub.calls))
         return repo_id, stub, row
+
+    def test_force_deletion_review_blocks_and_requires_exact_one_use_approval(self):
+        from app.protection import load_review, review_token
+        token = self.setup_admin()
+        for case in ("large", "empty", "incomplete"):
+            with self.subTest(case=case):
+                repo_id, stub, _ = self.dangerous_deletion_review()
+                self.main.db.run("UPDATE repositories SET mode='force', status='pending', enabled=1, "
+                                 "deletion_review=NULL WHERE id=?", (repo_id,))
+                if case == "empty":
+                    stub.file_trees["up/demo", "b" * 40] = set()
+                if case == "incomplete":
+                    stub.tree_errors["up/demo", "b" * 40] = RuntimeError("incomplete tree")
+                observation = stub.nodes["N1"]
+                def row():
+                    return self.main.db.one("SELECT * FROM repositories WHERE id=?", (repo_id,))
+                with mock.patch.object(engine, "align_upstream", return_value="synced") as align:
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "needs_attention")
+                    align.assert_not_called()
+                    self.assertEqual(stub.refs["me/demo"], "a" * 40)
+                    self.assertEqual(row()["mode"], "force")
+                    approval = review_token(load_review(row()))
+                    response = self.client.post(f"/repos/{repo_id}/confirm-deletion",
+                                                data={"csrf": self.csrf(token), "review": approval})
+                    if case == "incomplete":
+                        self.assertEqual(response.status_code, 409)
+                        continue
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "synced")
+                    align.assert_called_once()
+                    self.assertIsNone(row()["deletion_approval"])
+                    # A failed/unconfirmed push cannot reuse the consumed approval.
+                    self.assertEqual(engine.sync_one(self.main.db, stub, row(), observation), "needs_attention")
+                    align.assert_called_once()
 
     def backup_record(self, repo_id, full_name="me/demo", fork_sha=None, status="ready",
                       contents=b"isolated backup fixture\n", error=None):
@@ -1848,6 +1908,71 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("Backup <disk full>", response.text)
         self.assertNotIn("Old backup error", response.text)
         self.assertNotIn(TEST_PASSWORD, response.text)
+
+
+    def test_bulk_form_auth_csrf_and_partial_success(self):
+        self.assertEqual(self.client.post("/repos/bulk", data={"action": "pause", "repo_ids": "1"}).status_code, 302)
+        token = self.setup_admin()
+        from app.db import insert_repository
+        ids = [insert_repository(self.main.db, owner="me", name=name, full_name="me/" + name,
+                                 upstream_full_name="up/project") for name in ("sync", "custom", "other")]
+        self.main.db.run("UPDATE repositories SET enabled=0,status='paused'")
+        self.main.db.run("UPDATE repositories SET mode='protected' WHERE id=?", (ids[1],))
+        payload = {"action": "resume", "repo_ids": [str(ids[0]), str(ids[1])],
+                   "filter": "paused", "q": "project", "mode": "safe"}
+        self.assertEqual(self.client.post("/repos/bulk", data=payload).status_code, 403)
+        payload["csrf"] = self.csrf(token)
+        with mock.patch.object(self.main.worker, "request_sync") as wake:
+            response = self.client.post("/repos/bulk", data=payload)
+        self.assertEqual(response.status_code, 303)
+        wake.assert_called_once()
+        query = parse_qs(urlsplit(response.headers["location"]).query)
+        self.assertEqual(query["q"], ["project"])
+        self.assertEqual(query["mode"], ["safe"])
+        self.assertIn("已处理 1 个，跳过 1 个", query["notice"][0])
+        self.assertIn("独立维护", query["notice"][0])
+        for id in ids[1:]:
+            self.assertEqual(self.main.db.one("SELECT enabled FROM repositories WHERE id=?", (id,))["enabled"], 0)
+        response = self.client.post("/repos/bulk", data={"csrf": self.csrf(token), "action": "pause"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_repo_search_mode_filter_and_fragment_keep_the_same_scope(self):
+        token = self.setup_admin()
+        from app.db import insert_repository
+        for name, upstream, mode in (("sync", "up/alpha", "safe"), ("custom", "up/alpha", "protected"), ("elsewhere", "up/beta", "safe")):
+            id = insert_repository(self.main.db, owner="me", name=name, full_name="me/" + name, upstream_full_name=upstream)
+            self.main.db.run("UPDATE repositories SET mode=? WHERE id=?", (mode, id))
+        response, page = self.rendered_page("/repos?q=ALPHA&mode=safe")
+        self.assertIn("me/sync", response.text)
+        self.assertNotIn("me/custom", response.text)
+        self.assertNotIn("me/elsewhere", response.text)
+        form = self.assert_post_form(page, "/repos/bulk", token)
+        checks = page.find("input", name="repo_ids")
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["attrs"]["form"], "repo-bulk-form")
+        self.assertTrue(page.labels_for(checks[0]))
+        self.assertFalse(any(p["tag"] == "form" for p in form["parents"]))
+        fragment = self.client.get("/partials/repos?q=ALPHA&mode=safe")
+        self.assertIn("me/sync", fragment.text)
+        self.assertNotIn("me/custom", fragment.text)
+        revision = fragment.headers["x-forkiq-revision"]
+        self.assertEqual(self.client.get("/partials/repos?q=ALPHA&mode=safe&v=" + revision).status_code, 204)
+        self.assertEqual(self.client.get("/partials/repos?q=ALPHA&mode=protected&v=" + revision).status_code, 200)
+        self.assertIn("没有符合筛选条件", self.client.get("/repos?q=%25").text)
+
+    def test_fragment_revision_tracks_protection_and_rollback_eligibility(self):
+        self.setup_admin()
+        from app.db import insert_repository
+        id = insert_repository(self.main.db, owner="me", name="demo", full_name="me/demo", upstream_full_name="up/demo")
+        old = self.main._repos_revision("")
+        self.main.db.run("UPDATE repositories SET mode='protected' WHERE id=?", (id,))
+        self.assertNotEqual(old, self.main._repos_revision(""))
+        old = self.main._repos_revision("")
+        self.main.db.run("UPDATE repositories SET restore_backup_id=42 WHERE id=?", (id,))
+        self.assertNotEqual(old, self.main._repos_revision(""))
+        _, page = self.rendered_page("/repos")
+        check = page.find("input", name="repo_ids")[0]
+        self.assertIn("disabled", check["attrs"])
 
 
 if __name__ == "__main__":

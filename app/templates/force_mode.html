@@ -1,0 +1,17 @@
+{% extends "shell.html" %}
+{% set active_page = "repos" %}
+{% block title %}ForkIQ · 确认强制同步{% endblock %}
+{% block page_title %}确认强制同步{% endblock %}
+{% block content %}
+<a class="back-link" href="/repos/{{ repo.id }}">返回仓库详情</a>
+<section class="card">
+  <h2>{{ repo.full_name }}</h2>
+  <p class="notice warn">这是持续生效的同步模式。每次检查都以上游为准：你自己的提交、历史分叉和上游删除的文件都可能被覆盖，包括上游清空文件的情况。</p>
+  <dl class="kv"><dt>上游</dt><dd>{{ repo.upstream_full_name }}</dd><dt>同步分支</dt><dd>{{ repo.branch }}</dd></dl>
+  <p class="field-help">每次覆盖前必须成功备份当前版本，自动保留最近 3 份。此模式只放宽独有提交和历史分叉保护，异常删除保护沿用系统及仓库配置，默认开启：空树和大量删除需在仓库详情逐次确认；检测不完整时不能确认放行。只对所示分支生效，不删除其他分支、标签或 GitHub 仓库。</p>
+  <form method="post" action="/repos/{{ repo.id }}/mode">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="mode_choice" value="force"><input type="hidden" name="confirmation" value="force">
+    <div class="actions"><button class="danger" {% if repo.restore_backup_id %}disabled{% endif %}>确认开启强制同步并立即检查</button><a class="secondary link" href="/repos/{{ repo.id }}">取消</a></div>
+  </form>
+</section>
+{% endblock %}

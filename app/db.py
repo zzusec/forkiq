@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS repositories(
   full_name TEXT NOT NULL UNIQUE,
   upstream_full_name TEXT,
   branch TEXT NOT NULL DEFAULT 'main',
-  mode TEXT NOT NULL DEFAULT 'mirror',
+  mode TEXT NOT NULL DEFAULT 'safe',
   enabled INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'pending',
   upstream_sha TEXT,
@@ -145,6 +145,11 @@ class DB:
         for name, kind in (("restore_backup_id", "INTEGER"), ("restore_expected_sha", "TEXT")):
             if name not in columns:
                 conn.execute(f"ALTER TABLE repositories ADD COLUMN {name} {kind}")
+        # Legacy mirror rows now only fast-forward. Legacy custom forks must
+        # never start merging automatically after upgrading this installation.
+        conn.execute("UPDATE repositories SET mode='safe' WHERE mode='mirror'")
+        conn.execute("UPDATE repositories SET mode='protected', enabled=0, status='paused', "
+                     "sync_requested=0, self_update_interval=NULL WHERE mode='manual'")
         conn.commit()
 
     def run(self, sql, params=()):
@@ -178,7 +183,7 @@ def insert_repository(db, *, owner, name, full_name, upstream_full_name, branch=
     now = utcnow()
     cur = db.run(
         "INSERT INTO repositories(owner,name,full_name,upstream_full_name,branch,node_id,"
-        "status,discovered,is_archived,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "status,discovered,is_archived,created_at,updated_at,mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,'safe')",
         (owner, name, full_name, upstream_full_name, branch, node_id, status,
          discovered, is_archived, now, now))
     return cur.lastrowid

@@ -56,8 +56,8 @@ button.primary:hover, .link.primary:hover { background: var(--primary-hover); }
 [data-theme="dark"] button.primary, [data-theme="dark"] .link.primary { color: #132b1b; }
 button.secondary, .link.secondary { color: var(--ink); background: var(--card); border-color: var(--line); }
 button.secondary:hover, .link.secondary:hover { color: var(--primary); background: var(--primary-soft); border-color: var(--primary); }
-button.danger { color: var(--red); background: var(--card); border-color: var(--line); }
-button.danger:hover { background: var(--danger-soft); border-color: var(--red); }
+button.danger, .link.danger { color: var(--red); background: var(--card); border-color: var(--line); }
+button.danger:hover, .link.danger:hover { background: var(--danger-soft); border-color: var(--red); }
 .icon { flex: none; vertical-align: middle; }
 button .icon, .link .icon { width: 16px; height: 16px; }
 .icon-button { color: var(--muted); background: transparent; width: 36px; padding: 8px; }
@@ -204,6 +204,62 @@ tr:hover td { background: var(--surface); }
 
 /* Frequent controls stay in view; setup and uncommon actions use disclosure. */
 .repo-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
+.repo-search { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.repo-search > div { min-width: 150px; }
+.repo-search-query { flex: 1; }
+.repo-search label { margin: 0; font-size: 12px; color: var(--muted); }
+.content .repo-search input[type="search"] { width: 100%; max-width: none; margin-top: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--card); font: inherit; }
+.repo-mode-options { min-width: 0; margin: 0; padding: 0; border: 0; }
+.repo-mode-options legend { margin-bottom: 6px; padding: 0; color: var(--muted); font-size: 12px; }
+.mode-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.content .mode-chip { margin: 0; cursor: pointer; }
+.mode-chip span { display: block; padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 13px; line-height: 22px; white-space: nowrap; }
+.mode-chip:hover span { color: var(--primary); border-color: var(--primary); }
+.mode-chip input:checked + span { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.mode-chip input:focus-visible + span { outline: 1px dashed var(--muted); outline-offset: 3px; }
+.repo-mode-options input:focus-visible { outline: none; }
+.repo-search :is(input[type="search"], button):focus-visible, .bulk-toolbar :is(button, input):focus-visible { outline: 1px dashed var(--muted); outline-offset: 3px; }
+.content .repo-search > button { margin: 0; min-height: 42px; }
+.clear-filters { padding: 9px 0; font-size: 12px; }
+.bulk-toolbar { position: sticky; top: var(--header-height); z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: -4px 0 20px; padding: 12px 0 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+.bulk-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; flex: 1; font-size: 12px; }
+.content .select-visible { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 36px; white-space: nowrap; cursor: pointer; color: var(--ink); }
+#bulk-count { font-variant-numeric: tabular-nums; color: var(--primary); }
+.text-button { padding: 4px 2px; border: 0; background: transparent; color: var(--muted); font-size: 12px; box-shadow: none; }
+.bulk-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.content .bulk-form > button { margin: 0; white-space: nowrap; }
+.bulk-form > button:disabled, .bulk-selection > button:disabled { cursor: default; }
+.bulk-toolbar .field-help { flex-basis: 100%; max-width: none; margin: 0; font-size: 11px; }
+.repo-identity { display: flex; align-items: flex-start; gap: 10px; }
+.repo-identity .repo-pair { flex: 1; min-width: 0; }
+.content .repo-select-label { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 24px; min-height: 32px; margin: -3px 0 0 -5px; cursor: pointer; }
+.repo-select-label:has(input:disabled) { cursor: not-allowed; opacity: .5; }
+.repos tr.is-selected td, .repos tr.is-selected:hover td { background: var(--primary-soft); }
+.repos tr[id] { scroll-margin-top: 200px; }
+#bulk-dialog { width: min(640px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); margin: auto; padding: 24px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow-y: auto; }
+#bulk-dialog::backdrop { background: rgba(15, 28, 20, .45); }
+#bulk-dialog-title { margin-bottom: 12px; }
+.bulk-summary { color: var(--ink); font-weight: 500; font-variant-numeric: tabular-nums; }
+.bulk-preview-list { list-style: none; margin: 18px 0; padding: 0; max-height: 280px; overflow-y: auto; border-block: 1px solid var(--line); }
+.bulk-preview-list li { display: flex; justify-content: space-between; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.bulk-preview-list li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.bulk-preview-list li > span:last-child { flex-shrink: 0; }
+.bulk-preview-list li:last-child { border: 0; }
+.bulk-will-change { color: var(--primary); }
+.bulk-dialog-actions { justify-content: flex-end; }
+@media (max-width: 760px) {
+  .repo-search { gap: 10px; }
+  .repo-search-query { flex-basis: 100%; }
+  .repo-mode-options { flex: 1; }
+  .mode-chips { gap: 6px; }
+  .mode-chip span { padding-inline: 10px; }
+  .bulk-toolbar { position: static; margin: 0 0 18px; padding: 0 0 16px; }
+  .bulk-selection, .bulk-form { flex-basis: 100%; }
+  .bulk-form button { min-height: 42px; }
+  .content .repo-select-label { width: 32px; min-height: 38px; margin-top: -6px; }
+  .bulk-preview-list li { flex-wrap: wrap; gap: 4px 10px; }
+  #bulk-dialog { padding: 18px; }
+}
 .add-repo > summary { display: flex; align-items: center; gap: 7px; width: fit-content; min-height: 38px; padding: 7px 13px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--card); font-size: 13px; cursor: pointer; list-style: none; }
 .add-repo > summary::-webkit-details-marker { display: none; }
 .add-repo > summary:hover { border-color: var(--primary); color: var(--primary); }
@@ -221,7 +277,6 @@ tr:hover td { background: var(--surface); }
 .content .repo-controls form:not(.inline) > button { margin: 0; }
 .repo-controls > a { display: inline-block; margin-top: 4px; padding: 2px 8px; font-size: 12px; }
 button.resume-button { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
-.repos tr[id] { scroll-margin-top: 84px; }
 .repo-sync-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px; }
 .repo-sync-bar h2 { display: flex; align-items: center; gap: 12px; margin-bottom: 5px; }
 .repo-sync-bar p { font-size: 13px; }
@@ -280,7 +335,7 @@ form.inline button { min-height: 42px; flex-shrink: 0; }
 label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 .content section form:not(.inline):not(.actions form) > label { margin-bottom: 16px; }
 .content label input:not([type="checkbox"]) { display: block; margin-top: 7px; max-width: 500px; }
-.content section form:not(.inline) > button { margin-top: 6px; }
+.content section form:not(.inline):not(.actions form) > button { margin-top: 6px; }
 .stacked-form { display: grid; gap: 8px; }
 .stacked-form input { margin-bottom: 14px; }
 .stacked-form .error { margin-bottom: 8px; }
@@ -356,7 +411,7 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   form.inline input { flex: none; }
   .kv { grid-template-columns: 86px minmax(0, 1fr); gap: 14px 12px; font-size: 13px; }
   .actions { align-items: stretch; }
-  .actions button { min-height: 42px; }
+  .actions button, .actions .link { min-height: 42px; }
   .auth-layout { padding: 28px 20px; }
   .auth-card { padding: 30px 24px; }
   .auth-brand { margin-bottom: 24px; }

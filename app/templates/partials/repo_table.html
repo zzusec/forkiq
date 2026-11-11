@@ -1,6 +1,6 @@
 {% from "components.html" import icon, status, status_label, github_link, repo_link, version_chip, verdict_chip, timestamp %}
 <div data-revision="{{ revision }}">
-<div class="list-heading"><h2>受管仓库 <span class="muted">{{ repos|length }}</span></h2><span class="muted">{{ '当前筛选' if filter else '全部仓库' }}</span></div>
+<div class="list-heading"><h2>受管仓库 <span class="muted">{{ repos|length }}</span></h2><span class="muted">{{ '当前筛选' if filter or q or mode else '全部仓库' }}</span></div>
 {% if repos %}
 <div class="table-wrap" role="region" aria-label="仓库列表" tabindex="0"><table class="repos">
   <tr><th>仓库</th><th>上游</th><th>版本对比</th><th>状态</th><th>最近检查</th><th>同步操作</th></tr>
@@ -9,31 +9,36 @@
     {#- 本地与上游共用一个两行网格（名称 / 版本），两侧的版本行因此永远同层。
         子项按列优先填充，顺序（本地名称 / 本地版本 / 上游名称 / 上游版本）
         就是网格的契约，不要插入额外子项。 -#}
-    <td colspan="2"><div class="repo-pair">
+    <td colspan="2"><div class="repo-identity"><label class="repo-select-label"><input type="checkbox" name="repo_ids" value="{{ r.id }}" form="repo-bulk-form" data-repo-select data-repo-name="{{ r.full_name }}" data-repo-mode="{{ r.mode }}" data-repo-enabled="{{ r.enabled }}" data-repo-status="{{ r.status }}" data-repo-queued="{{ r.sync_requested }}" {% if r.restore_backup_id is not none %}disabled{% endif %} aria-label="选择 {{ r.full_name }}" aria-describedby="bulk-selection-help"><span class="sr-only">选择 {{ r.full_name }}</span></label><div class="repo-pair">
       <div class="pair-name pair-local"><span class="sr-only">fork 仓库：</span><a href="/repos/{{ r.id }}">{{ r.full_name }}</a>{{ github_link(r.full_name, '在 GitHub 打开 fork') }}{% if r.upstream_gone %}<span class="tag tag-warn">上游已删除</span>{% endif %}</div>
       <div class="version-line pair-local">{{ version_chip(r.fork_sha, r.fork_tag, r.fork_commit_at, side='本地', tone=r.fork_tone) }}</div>
       <div class="pair-name pair-upstream muted"><span class="sr-only">上游仓库：</span>{{ repo_link(r.upstream_full_name) }}</div>
       <div class="version-line pair-upstream">{{ version_chip(r.upstream_sha, r.upstream_tag, r.upstream_commit_at, side='上游') }}</div>
-    </div></td>
+    </div></div></td>
     <td data-label="版本对比">{{ verdict_chip(r.verdict) }}</td>
     <td data-label="状态">{{ status(r.status) }}
+        {% if r.restore_backup_id is not none %}<span class="tag tag-warn">回滚处理中</span>{% endif %}
         {% if r.last_error %}{% set guidance = r.last_error | error_guidance %}<a class="error-details" href="/repos/{{ r.id }}#repo-error" data-error-repo="{{ r.full_name }}" data-error-status="{{ status_label(r.status) }}" data-error-message="{{ r.last_error }}" data-error-summary="{{ guidance.summary if guidance else '' }}" data-error-action="{{ guidance.action if guidance else '' }}">查看详情</a>{% endif %}</td>
     <td class="muted" data-label="最近检查">{{ timestamp(r.last_check_at) }}</td>
     <td class="repo-controls">
+      {% if r.mode == 'force' %}<span class="tag tag-warn">强制同步</span>{% endif %}
+      {% if r.restore_backup_id is not none %}<span class="muted">等待回滚完成</span>{% elif r.mode == 'protected' %}<span class="tag tag-warn">独立维护</span>{% else %}
       <form method="post" action="/repos/{{ r.id }}/{{ 'pause' if r.enabled and r.status != 'paused' else 'resume' }}">
         <input type="hidden" name="csrf" value="{{ csrf }}">
         <input type="hidden" name="return_filter" value="{{ filter or 'all' }}">
+        <input type="hidden" name="return_q" value="{{ q }}"><input type="hidden" name="return_mode" value="{{ mode }}">
         {% if r.enabled and r.status != 'paused' %}
         <button class="secondary" aria-label="暂停同步 {{ r.full_name }}">{{ icon('pause') }}暂停</button>
         {% else %}
         <button class="secondary resume-button" aria-label="恢复同步 {{ r.full_name }}">{{ icon('refresh-cw') }}恢复</button>
         {% endif %}
       </form>
+      {% endif %}
       <a href="/repos/{{ r.id }}" aria-label="查看 {{ r.full_name }} 的仓库详情">详情</a>
     </td>
   </tr>
   {% endfor %}
 </table></div>
-{% elif filter %}<p class="muted">没有符合筛选条件的仓库。<a href="/repos">查看全部仓库</a></p>
+{% elif filter or q or mode %}<p class="muted">没有符合筛选条件的仓库。<a href="/repos">清除筛选，查看全部仓库</a></p>
 {% else %}<p class="muted">还没有受管仓库。粘贴一个 fork 链接，或在设置里开启自动发现。</p>{% endif %}
 </div>

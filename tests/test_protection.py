@@ -74,7 +74,7 @@ class ProtectionTests(unittest.TestCase):
 
     def manual_mode(self):
         self.configure(mode="manual", self_update_interval=1)
-        self.client.compare_result = {"ahead_by": 2, "behind_by": 1,
+        self.client.compare_result = {"ahead_by": 2, "behind_by": 0,
                                       "merge_base_commit": {"sha": self.base_sha}}
         self.client.file_trees["me/demo", self.base_sha] = {"one", "two", "three", "four"}
         self.client.workflows = [{"id": 1, "name": "Update data", "path": ".github/workflows/update.yml",
@@ -177,7 +177,7 @@ class ProtectionTests(unittest.TestCase):
         self.client.file_trees["me/demo", self.fork_sha] |= {"fork-only-1", "fork-only-2", "fork-only-3"}
         engine.run_cycle(self.db, self.client)
         self.assertEqual(self.row()["status"], "synced")
-        self.assertIn(("merge_commit", "me/demo", "main", self.target_sha), self.client.calls)
+        self.assertIn(("update_ref", "me/demo", "main", self.target_sha), self.client.calls)
         self.assertIn(("file_paths", "me/demo", self.base_sha), self.client.calls)
 
     def test_manual_deletion_counts_use_the_intersection_with_files_still_in_the_fork(self):
@@ -212,10 +212,13 @@ class ProtectionTests(unittest.TestCase):
             with self.subTest(result=result, error=error):
                 self.client.calls.clear()
                 self.client.compare_result, self.client.compare_error = result, error
-                self.configure(status="pending", deletion_review=None, last_error=None)
+                self.configure(mode="manual", enabled=1, status="pending", deletion_review=None, last_error=None)
                 engine.run_cycle(self.db, self.client)
-                self.assert_blocked()
-                self.assertTrue(load_review(self.row())["error"])
+                self.assertEqual(self.row()["status"], "paused")
+                self.assertEqual(self.row()["mode"], "protected")
+                self.assert_no_mutations()
+                self.assertIsNone(load_review(self.row()))
+
 
     def test_incomplete_compare_counts_cannot_claim_already_synced_or_permit_manual_merges(self):
         self.manual_mode()
@@ -232,13 +235,16 @@ class ProtectionTests(unittest.TestCase):
             with self.subTest(comparison=comparison):
                 self.client.calls.clear()
                 self.client.compare_result = comparison
-                self.configure(status="pending", deletion_review=None, last_error=None)
+                self.configure(mode="manual", enabled=1, status="pending", deletion_review=None, last_error=None)
                 self.assertFalse(valid_comparison(comparison))
                 engine.run_cycle(self.db, self.client)
-                self.assert_blocked()
-                self.assertIn("提交比较", load_review(self.row())["error"])
+                self.assertEqual(self.row()["status"], "paused")
+                self.assertEqual(self.row()["mode"], "protected")
+                self.assert_no_mutations()
+                self.assertIsNone(load_review(self.row()))
         self.assertTrue(valid_comparison({"ahead_by": 0, "behind_by": 0}))
-        self.assertTrue(valid_comparison({"ahead_by": 2, "behind_by": 1}))
+        self.assertTrue(valid_comparison({"ahead_by": 2, "behind_by": 0}))
+
 
     def test_auth_and_rate_errors_persist_a_visible_review_then_propagate_without_writes(self):
         for error in (AuthError("expired"), RateLimited("API rate limit exceeded")):
@@ -334,7 +340,7 @@ class ProtectionTests(unittest.TestCase):
         self.assertNotEqual(review_token(load_review(self.row())), review_token(before))
         self.assertIsNone(self.row()["deletion_approval"])
 
-    def test_manual_confirmation_merges_only_the_exact_reviewed_commit(self):
+    def test_legacy_mode_confirmation_fast_forwards_only_the_exact_reviewed_commit(self):
         self.manual_mode()
         self.configure(self_update_interval=None)
         self.dangerous_target()
@@ -343,9 +349,9 @@ class ProtectionTests(unittest.TestCase):
         self.client.calls.clear()
         engine.run_cycle(self.db, self.client)
         self.assertEqual(self.row()["status"], "synced")
-        self.assertEqual([call for call in self.client.calls if call[0] == "merge_commit"],
-                         [("merge_commit", "me/demo", "main", self.target_sha)])
-        self.assertFalse(any(call[0] in ("update_ref", "merge_upstream") for call in self.client.calls))
+        self.assertEqual([call for call in self.client.calls if call[0] == "update_ref"],
+                         [("update_ref", "me/demo", "main", self.target_sha)])
+        self.assertFalse(any(call[0] in ("merge_commit", "merge_upstream") for call in self.client.calls))
         self.assertIsNone(self.row()["deletion_approval"])
 
     def test_failed_detection_review_cannot_be_approved_by_hashing_its_error_payload(self):
@@ -516,7 +522,9 @@ class LegacyProtectionMigrationTests(unittest.TestCase):
             migrated = DB(path)
             try:
                 row = migrated.one("SELECT * FROM repositories WHERE id=7")
-                self.assertEqual(tuple(row[name] for name in names), before)
+                self.assertEqual(tuple(row[name] for name in names if name != "mode"),
+                                 tuple(value for name, value in zip(names, before) if name != "mode"))
+                self.assertEqual(row["mode"], "protected")
                 for name in ("deletion_protection", "deletion_max_files", "deletion_max_percent",
                              "deletion_review", "deletion_approval"):
                     self.assertIsNone(row[name])
